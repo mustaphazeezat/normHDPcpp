@@ -1,0 +1,371 @@
+#include <Rcpp.h>
+#include <RcppEigen.h>
+#include "includes/normHDP_mcmc.h"
+#include "includes/utils.h"
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <cmath>
+#include <map>
+
+using namespace Rcpp;
+
+// Thread-safe progress tracking
+std::mutex progress_mutex;
+
+// FIXED: Proper SEXP handling to avoid stack imbalance
+struct ChainResult {
+    std::vector<Eigen::VectorXd> b_output;
+    std::vector<double> alpha_phi2_output;
+    std::vector<Eigen::MatrixXd> P_J_D_output;
+    std::vector<Eigen::VectorXd> P_output;
+    std::vector<double> alpha_output;
+    std::vector<double> alpha_zero_output;
+    std::vector<Eigen::MatrixXd> mu_star_1_J_output;
+    std::vector<Eigen::MatrixXd> phi_star_1_J_output;
+    std::vector<std::vector<Eigen::VectorXd>> Beta_output;
+    std::vector<std::vector<std::vector<int>>> Z_output;
+    int D;
+};
+
+// Run a single chain - returns plain C++ struct, no R objects
+ChainResult run_single_chain_safe(
+    const std::vector<Eigen::MatrixXd>& Y,
+    int J,
+    int chain_length,
+    int thinning,
+    bool empirical,
+    int burn_in,
+    bool quadratic,
+    double beta_mean,
+    double alpha_mu_2,
+    double adaptive_prop,
+    const Eigen::VectorXd& baynorm_mu_estimate,
+    const Eigen::VectorXd& baynorm_phi_estimate,
+    const std::vector<Eigen::VectorXd>& baynorm_beta,
+    int chain_id,
+    bool print_progress
+) {
+    if (print_progress) {
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        Rcpp::Rcout << "Starting chain " << (chain_id + 1) << std::endl;
+    }
+
+    // Initialize RNG with different seed for each chain
+    init_rng(std::random_device{}() + chain_id * 1000);
+
+    NormHDPResult result = normHDP_mcmc(
+        Y, J, chain_length, thinning, empirical, burn_in, quadratic,
+        999999,  // iter_update (no printing within chain)
+        beta_mean, alpha_mu_2, adaptive_prop,
+        false,   // print_Z
+        1,       // num_cores per chain (parallelism at chain level)
+        false,   // save_only_z
+        baynorm_mu_estimate,
+        baynorm_phi_estimate,
+        baynorm_beta
+    );
+
+    if (print_progress) {
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        Rcpp::Rcout << "Completed chain " << (chain_id + 1) << std::endl;
+    }
+
+    // Copy to plain struct
+    ChainResult chain_result;
+    chain_result.b_output = result.b_output;
+    chain_result.alpha_phi2_output = result.alpha_phi2_output;
+    chain_result.P_J_D_output = result.P_J_D_output;
+    chain_result.P_output = result.P_output;
+    chain_result.alpha_output = result.alpha_output;
+    chain_result.alpha_zero_output = result.alpha_zero_output;
+    chain_result.mu_star_1_J_output = result.mu_star_1_J_output;
+    chain_result.phi_star_1_J_output = result.phi_star_1_J_output;
+    chain_result.Beta_output = result.Beta_output;
+    chain_result.Z_output = result.Z_output;
+    chain_result.D = result.D;
+
+    return chain_result;
+}
+
+// Compute mean and standard deviation
+template<typename T>
+void compute_mean_sd(const std::vector<T>& samples, T& mean, T& sd) {
+    int n = samples.size();
+    if (n == 0) return;
+
+    mean = samples[0];
+    for (int i = 1; i < n; ++i) {
+        mean += samples[i];
+    }
+    mean /= n;
+
+    sd = (samples[0] - mean).cwiseProduct(samples[0] - mean);
+    for (int i = 1; i < n; ++i) {
+        sd += (samples[i] - mean).cwiseProduct(samples[i] - mean);
+    }
+    sd = (sd / (n - 1)).cwiseSqrt();
+}
+
+void compute_scalar_mean_sd(const std::vector<double>& samples, double& mean, double& sd) {
+    int n = samples.size();
+    if (n == 0) return;
+
+    mean = 0.0;
+    for (double s : samples) mean += s;
+    mean /= n;
+
+    sd = 0.0;
+    for (double s : samples) sd += (s - mean) * (s - mean);
+    sd = std::sqrt(sd / (n - 1));
+}
+
+// [[Rcpp::export]]
+Rcpp::List ensemble_mcmc_R(
+    Rcpp::List Y,
+    int J,
+    int num_chains,
+    int chain_length,
+    int thinning,
+    bool empirical,
+    int burn_in,
+    bool quadratic,
+    int iter_update,
+    double beta_mean,
+    double alpha_mu_2,
+    double adaptive_prop,
+    bool print_progress,
+    int num_cores,
+    Rcpp::NumericVector baynorm_mu_estimate,
+    Rcpp::NumericVector baynorm_phi_estimate,
+    Rcpp::List baynorm_beta_list
+) {
+    // FIXED: Convert all R objects to C++ BEFORE threading
+    int D = Y.size();
+
+    std::vector<Eigen::MatrixXd> Y_vec(D);
+    for (int d = 0; d < D; d++) {
+        Y_vec[d] = Rcpp::as<Eigen::MatrixXd>(Y[d]);
+    }
+
+    std::vector<Eigen::VectorXd> baynorm_beta(D);
+    for (int d = 0; d < D; d++) {
+        baynorm_beta[d] = Rcpp::as<Eigen::VectorXd>(baynorm_beta_list[d]);
+    }
+
+    Eigen::VectorXd mu_vec = Rcpp::as<Eigen::VectorXd>(baynorm_mu_estimate);
+    Eigen::VectorXd phi_vec = Rcpp::as<Eigen::VectorXd>(baynorm_phi_estimate);
+
+    int G = Y_vec[0].rows();
+    std::vector<int> C(D);
+    for (int d = 0; d < D; d++) {
+        C[d] = Y_vec[d].cols();
+    }
+
+    if (num_cores <= 0) {
+        num_cores = std::thread::hardware_concurrency();
+    }
+
+    Rcpp::Rcout << "\n" << std::string(70, '=') << "\n";
+    Rcpp::Rcout << "ENSEMBLE MCMC\n";
+    Rcpp::Rcout << std::string(70, '=') << "\n";
+    Rcpp::Rcout << "Configuration:\n";
+    Rcpp::Rcout << "  Number of chains:  " << num_chains << "\n";
+    Rcpp::Rcout << "  Chain length:      " << chain_length << " iterations\n";
+    Rcpp::Rcout << "  Burn-in:           " << burn_in << " iterations\n";
+    Rcpp::Rcout << "  Thinning:          " << thinning << "\n";
+    Rcpp::Rcout << "  Parallel cores:    " << num_cores << "\n";
+    Rcpp::Rcout << "  Datasets:          " << D << "\n";
+    Rcpp::Rcout << "  Genes:             " << G << "\n";
+    Rcpp::Rcout << "  Clusters:          " << J << "\n";
+    Rcpp::Rcout << std::string(70, '=') << "\n\n";
+
+    // FIXED: Use plain C++ vector, no R objects in threads
+    std::vector<ChainResult> chain_results(num_chains);
+
+    // FIXED: Process chains in batches, join threads before converting to R
+    for (int batch_start = 0; batch_start < num_chains; batch_start += num_cores) {
+        int batch_end = std::min(batch_start + num_cores, num_chains);
+        std::vector<std::thread> threads;
+
+        if (print_progress) {
+            Rcpp::Rcout << "Running chains " << (batch_start + 1)
+                        << " to " << batch_end << "...\n";
+        }
+
+        // Launch threads
+        for (int i = batch_start; i < batch_end; i++) {
+            threads.emplace_back([&, i]() {
+                chain_results[i] = run_single_chain_safe(
+                    Y_vec, J, chain_length, thinning, empirical, burn_in, quadratic,
+                    beta_mean, alpha_mu_2, adaptive_prop,
+                    mu_vec, phi_vec, baynorm_beta,
+                    i, print_progress
+                );
+            });
+        }
+
+        // FIXED: Wait for ALL threads to complete before continuing
+        for (auto& t : threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+
+        // FIXED: Check for user interrupt between batches, not during threading
+        Rcpp::checkUserInterrupt();
+
+        if (print_progress) {
+            Rcpp::Rcout << "Batch completed (" << batch_end << "/" << num_chains
+                        << " chains done)\n\n";
+        }
+    }
+
+    // FIXED: Now convert to R objects AFTER all threads are done
+    Rcpp::List Z_trace_all(num_chains);
+
+    for (int i = 0; i < num_chains; i++) {
+        const auto& result = chain_results[i];
+        int n_samples = result.Z_output.size();
+
+        Rcpp::List Z_trace_i(n_samples);
+        for (int t = 0; t < n_samples; t++) {
+            Rcpp::List Z_t(D);
+            for (int d = 0; d < D; d++) {
+                Z_t[d] = Rcpp::wrap(result.Z_output[t][d]);
+            }
+            Z_trace_i[t] = Z_t;
+        }
+        Z_trace_all[i] = Z_trace_i;
+    }
+
+    Rcpp::Rcout << "All chains completed. Computing ensemble statistics...\n";
+
+    // ===== AVERAGING & POSTERIOR SUMMARY =====
+    std::vector<Eigen::VectorXd> b_samples;
+    std::vector<double> alpha_phi2_samples;
+    std::vector<Eigen::MatrixXd> P_J_D_samples;
+    std::vector<Eigen::VectorXd> P_samples;
+    std::vector<double> alpha_samples;
+    std::vector<double> alpha_zero_samples;
+    std::vector<Eigen::MatrixXd> mu_samples;
+    std::vector<Eigen::MatrixXd> phi_samples;
+    std::vector<std::vector<Eigen::VectorXd>> Beta_samples(D);
+
+    for (int i = 0; i < num_chains; i++) {
+        const auto& r = chain_results[i];
+        int last = r.b_output.size() - 1;
+        if (last < 0) continue;
+
+        b_samples.push_back(r.b_output[last]);
+        alpha_phi2_samples.push_back(r.alpha_phi2_output[last]);
+        P_J_D_samples.push_back(r.P_J_D_output[last]);
+        P_samples.push_back(r.P_output[last]);
+        alpha_samples.push_back(r.alpha_output[last]);
+        alpha_zero_samples.push_back(r.alpha_zero_output[last]);
+        mu_samples.push_back(r.mu_star_1_J_output[last]);
+        phi_samples.push_back(r.phi_star_1_J_output[last]);
+
+        for (int d = 0; d < D; d++) {
+            Beta_samples[d].push_back(r.Beta_output[last][d]);
+        }
+    }
+
+    Eigen::VectorXd b_mean, b_sd;
+    Eigen::MatrixXd P_J_D_mean, P_J_D_sd;
+    Eigen::VectorXd P_mean, P_sd;
+    Eigen::MatrixXd mu_mean, mu_sd;
+    Eigen::MatrixXd phi_mean, phi_sd;
+
+    double alpha_phi2_mean, alpha_phi2_sd;
+    double alpha_mean, alpha_sd;
+    double alpha_zero_mean, alpha_zero_sd;
+
+    compute_mean_sd(b_samples, b_mean, b_sd);
+    compute_scalar_mean_sd(alpha_phi2_samples, alpha_phi2_mean, alpha_phi2_sd);
+    compute_mean_sd(P_J_D_samples, P_J_D_mean, P_J_D_sd);
+    compute_mean_sd(P_samples, P_mean, P_sd);
+    compute_scalar_mean_sd(alpha_samples, alpha_mean, alpha_sd);
+    compute_scalar_mean_sd(alpha_zero_samples, alpha_zero_mean, alpha_zero_sd);
+    compute_mean_sd(mu_samples, mu_mean, mu_sd);
+    compute_mean_sd(phi_samples, phi_mean, phi_sd);
+
+    std::vector<Eigen::VectorXd> Beta_mean(D);
+    std::vector<Eigen::VectorXd> Beta_sd(D);
+    for (int d = 0; d < D; d++) {
+        compute_mean_sd(Beta_samples[d], Beta_mean[d], Beta_sd[d]);
+    }
+
+    // ===== CONSENSUS CLUSTERING =====
+    Rcpp::Rcout << "Computing consensus clustering...\n";
+
+    std::vector<std::vector<int>> Z_consensus(D);
+    std::vector<Eigen::MatrixXd> coclustering(D);
+
+    for (int d = 0; d < D; d++) {
+        int C_d = C[d];
+        Eigen::MatrixXd cocluster = Eigen::MatrixXd::Zero(C_d, C_d);
+
+        for (int chain = 0; chain < num_chains; chain++) {
+            const auto& Z_last = chain_results[chain].Z_output.back()[d];
+            for (int c1 = 0; c1 < C_d; c1++) {
+                for (int c2 = c1; c2 < C_d; c2++) {
+                    if (Z_last[c1] == Z_last[c2]) {
+                        cocluster(c1, c2) += 1.0;
+                        if (c1 != c2) cocluster(c2, c1) += 1.0;
+                    }
+                }
+            }
+        }
+
+        cocluster /= num_chains;
+        coclustering[d] = cocluster;
+
+        Z_consensus[d].resize(C_d);
+        for (int c = 0; c < C_d; c++) {
+            std::map<int, int> freq;
+            for (int chain = 0; chain < num_chains; chain++) {
+                freq[chain_results[chain].Z_output.back()[d][c]]++;
+            }
+
+            int best = 0, maxc = 0;
+            for (auto& kv : freq) {
+                if (kv.second > maxc) {
+                    maxc = kv.second;
+                    best = kv.first;
+                }
+            }
+
+            Z_consensus[d][c] = best;
+        }
+    }
+
+    Rcpp::Rcout << "\n" << std::string(70, '=') << "\n";
+    Rcpp::Rcout << "ENSEMBLE COMPLETE\n";
+    Rcpp::Rcout << std::string(70, '=') << "\n\n";
+
+    // FIXED: Return R list only at the very end
+    return Rcpp::List::create(
+        Rcpp::_["b_mean"] = b_mean,
+        Rcpp::_["b_sd"] = b_sd,
+        Rcpp::_["alpha_phi2_mean"] = alpha_phi2_mean,
+        Rcpp::_["alpha_phi2_sd"] = alpha_phi2_sd,
+        Rcpp::_["P_J_D_mean"] = P_J_D_mean,
+        Rcpp::_["P_J_D_sd"] = P_J_D_sd,
+        Rcpp::_["P_mean"] = P_mean,
+        Rcpp::_["P_sd"] = P_sd,
+        Rcpp::_["alpha_mean"] = alpha_mean,
+        Rcpp::_["alpha_sd"] = alpha_sd,
+        Rcpp::_["alpha_zero_mean"] = alpha_zero_mean,
+        Rcpp::_["alpha_zero_sd"] = alpha_zero_sd,
+        Rcpp::_["mu_star_1_J_mean"] = mu_mean,
+        Rcpp::_["mu_star_1_J_sd"] = mu_sd,
+        Rcpp::_["phi_star_1_J_mean"] = phi_mean,
+        Rcpp::_["phi_star_1_J_sd"] = phi_sd,
+        Rcpp::_["Beta_mean"] = Beta_mean,
+        Rcpp::_["Beta_sd"] = Beta_sd,
+        Rcpp::_["Z_consensus"] = Z_consensus,
+        Rcpp::_["coclustering"] = coclustering,
+        Rcpp::_["Z_trace_all"] = Z_trace_all
+    );
+}

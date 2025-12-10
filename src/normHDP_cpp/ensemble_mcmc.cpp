@@ -1,12 +1,15 @@
 #include <Rcpp.h>
 #include <RcppEigen.h>
 #include "includes/normHDP_mcmc.h"
+#include "includes/mean_dispersion_horseshoe.h"
 #include "includes/utils.h"
 #include <iostream>
 #include <thread>
 #include <mutex>
 #include <cmath>
 #include <map>
+#include <chrono>
+#include <iomanip>
 
 using namespace Rcpp;
 
@@ -25,6 +28,8 @@ struct ChainResult {
     std::vector<Eigen::MatrixXd> phi_star_1_J_output;
     std::vector<std::vector<Eigen::VectorXd>> Beta_output;
     std::vector<std::vector<std::vector<int>>> Z_output;
+    std::vector<HorseshoeParams> horseshoe_output;  // NEW
+    bool use_sparse_prior;  // NEW
     int D;
 };
 
@@ -40,6 +45,8 @@ ChainResult run_single_chain_safe(
     double beta_mean,
     double alpha_mu_2,
     double adaptive_prop,
+    bool save_only_z,
+    bool use_sparse_prior,
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
     const std::vector<Eigen::VectorXd>& baynorm_beta,
@@ -60,7 +67,8 @@ ChainResult run_single_chain_safe(
         beta_mean, alpha_mu_2, adaptive_prop,
         false,   // print_Z
         1,       // num_cores per chain (parallelism at chain level)
-        false,   // save_only_z
+        save_only_z,
+        use_sparse_prior,
         baynorm_mu_estimate,
         baynorm_phi_estimate,
         baynorm_beta
@@ -83,6 +91,8 @@ ChainResult run_single_chain_safe(
     chain_result.phi_star_1_J_output = result.phi_star_1_J_output;
     chain_result.Beta_output = result.Beta_output;
     chain_result.Z_output = result.Z_output;
+    chain_result.horseshoe_output = result.horseshoe_output;  // NEW
+    chain_result.use_sparse_prior = result.use_sparse_prior;  // NEW
     chain_result.D = result.D;
 
     return chain_result;
@@ -136,6 +146,8 @@ Rcpp::List ensemble_mcmc_R(
     double adaptive_prop,
     bool print_progress,
     int num_cores,
+    bool save_only_z,
+    bool use_sparse_prior,
     Rcpp::NumericVector baynorm_mu_estimate,
     Rcpp::NumericVector baynorm_phi_estimate,
     Rcpp::List baynorm_beta_list
@@ -167,7 +179,7 @@ Rcpp::List ensemble_mcmc_R(
     }
 
     Rcpp::Rcout << "\n" << std::string(70, '=') << "\n";
-    Rcpp::Rcout << "ENSEMBLE MCMC\n";
+    Rcpp::Rcout << "ENSEMBLE MCMC" << (use_sparse_prior ? " (WITH HORSESHOE PRIOR)" : "") << "\n";
     Rcpp::Rcout << std::string(70, '=') << "\n";
     Rcpp::Rcout << "Configuration:\n";
     Rcpp::Rcout << "  Number of chains:  " << num_chains << "\n";
@@ -178,12 +190,16 @@ Rcpp::List ensemble_mcmc_R(
     Rcpp::Rcout << "  Datasets:          " << D << "\n";
     Rcpp::Rcout << "  Genes:             " << G << "\n";
     Rcpp::Rcout << "  Clusters:          " << J << "\n";
+    Rcpp::Rcout << "  Sparse prior:      " << (use_sparse_prior ? "YES" : "NO") << "\n";
     Rcpp::Rcout << std::string(70, '=') << "\n\n";
 
-    // FIXED: Use plain C++ vector, no R objects in threads
+    // Start timing
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Use plain C++ vector, no R objects in threads
     std::vector<ChainResult> chain_results(num_chains);
 
-    // FIXED: Process chains in batches, join threads before converting to R
+    // Process chains in batches, join threads before converting to R
     for (int batch_start = 0; batch_start < num_chains; batch_start += num_cores) {
         int batch_end = std::min(batch_start + num_cores, num_chains);
         std::vector<std::thread> threads;
@@ -198,7 +214,7 @@ Rcpp::List ensemble_mcmc_R(
             threads.emplace_back([&, i]() {
                 chain_results[i] = run_single_chain_safe(
                     Y_vec, J, chain_length, thinning, empirical, burn_in, quadratic,
-                    beta_mean, alpha_mu_2, adaptive_prop,
+                    beta_mean, alpha_mu_2, adaptive_prop, save_only_z, use_sparse_prior,
                     mu_vec, phi_vec, baynorm_beta,
                     i, print_progress
                 );
@@ -296,6 +312,49 @@ Rcpp::List ensemble_mcmc_R(
         compute_mean_sd(Beta_samples[d], Beta_mean[d], Beta_sd[d]);
     }
 
+    // ===== HORSESHOE PARAMETER AVERAGING (if using sparse prior) =====
+    Eigen::MatrixXd lambda_mean, lambda_sd;
+    Eigen::VectorXd tau_mean, tau_sd;
+    double sigma_mu_mean = 0.0, sigma_mu_sd = 0.0;
+
+    if (use_sparse_prior && !chain_results[0].horseshoe_output.empty()) {
+        Rcpp::Rcout << "Computing horseshoe parameter statistics...\n";
+
+        // Collect horseshoe samples from all chains (last sample from each chain)
+        std::vector<Eigen::MatrixXd> lambda_samples;
+        std::vector<Eigen::VectorXd> tau_samples;
+        std::vector<double> sigma_mu_samples;
+
+        for (int i = 0; i < num_chains; i++) {
+            const auto& r = chain_results[i];
+            int last = r.horseshoe_output.size() - 1;
+            if (last < 0) continue;
+
+            const auto& hs = r.horseshoe_output[last];
+
+            // Convert lambda vectors to matrix
+            Eigen::MatrixXd lambda_mat(J, G);
+            for (int j = 0; j < J; j++) {
+                lambda_mat.row(j) = hs.lambda[j].transpose();
+            }
+            lambda_samples.push_back(lambda_mat);
+
+            // Convert tau vector
+            Eigen::VectorXd tau_vec(J);
+            for (int j = 0; j < J; j++) {
+                tau_vec(j) = hs.tau[j];
+            }
+            tau_samples.push_back(tau_vec);
+
+            sigma_mu_samples.push_back(hs.sigma_mu);
+        }
+
+        // Compute means and SDs
+        compute_mean_sd(lambda_samples, lambda_mean, lambda_sd);
+        compute_mean_sd(tau_samples, tau_mean, tau_sd);
+        compute_scalar_mean_sd(sigma_mu_samples, sigma_mu_mean, sigma_mu_sd);
+    }
+
     // ===== CONSENSUS CLUSTERING =====
     Rcpp::Rcout << "Computing consensus clustering...\n";
 
@@ -342,10 +401,44 @@ Rcpp::List ensemble_mcmc_R(
 
     Rcpp::Rcout << "\n" << std::string(70, '=') << "\n";
     Rcpp::Rcout << "ENSEMBLE COMPLETE\n";
+    Rcpp::Rcout << std::string(70, '=') << "\n";
+
+    // End timing
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    // Convert to hours, minutes, seconds
+    int total_seconds = duration.count() / 1000;
+    int hours = total_seconds / 3600;
+    int minutes = (total_seconds % 3600) / 60;
+    int seconds = total_seconds % 60;
+
+    Rcpp::Rcout << "Timing Summary:\n";
+    Rcpp::Rcout << "  Total wall time:   ";
+    if (hours > 0) {
+        Rcpp::Rcout << hours << "h " << minutes << "m " << seconds << "s\n";
+    } else if (minutes > 0) {
+        Rcpp::Rcout << minutes << "m " << seconds << "s\n";
+    } else {
+        Rcpp::Rcout << seconds << "." << (duration.count() % 1000) << "s\n";
+    }
+
+    // Compute per-chain average
+    double avg_time_per_chain = duration.count() / (double)num_chains / 1000.0;
+    Rcpp::Rcout << "  Avg per chain:     " << std::fixed << std::setprecision(2)
+                << avg_time_per_chain << "s\n";
+
+    // Compute speedup from parallelization
+    double theoretical_serial_time = avg_time_per_chain * num_chains;
+    double actual_time = duration.count() / 1000.0;
+    double speedup = theoretical_serial_time / actual_time;
+    Rcpp::Rcout << "  Parallel speedup:  " << std::fixed << std::setprecision(2)
+                << speedup << "x (using " << num_cores << " cores)\n";
+
     Rcpp::Rcout << std::string(70, '=') << "\n\n";
 
-    // FIXED: Return R list only at the very end
-    return Rcpp::List::create(
+    // ===== BUILD RETURN LIST =====
+    Rcpp::List result_list = Rcpp::List::create(
         Rcpp::_["b_mean"] = b_mean,
         Rcpp::_["b_sd"] = b_sd,
         Rcpp::_["alpha_phi2_mean"] = alpha_phi2_mean,
@@ -366,6 +459,19 @@ Rcpp::List ensemble_mcmc_R(
         Rcpp::_["Beta_sd"] = Beta_sd,
         Rcpp::_["Z_consensus"] = Z_consensus,
         Rcpp::_["coclustering"] = coclustering,
-        Rcpp::_["Z_trace_all"] = Z_trace_all
+        Rcpp::_["Z_trace_all"] = Z_trace_all,
+        Rcpp::_["use_sparse_prior"] = use_sparse_prior
     );
+
+    // Add horseshoe parameters if sparse prior was used
+    if (use_sparse_prior && lambda_mean.size() > 0) {
+        result_list["lambda_mean"] = lambda_mean;
+        result_list["lambda_sd"] = lambda_sd;
+        result_list["tau_mean"] = tau_mean;
+        result_list["tau_sd"] = tau_sd;
+        result_list["sigma_mu_mean"] = sigma_mu_mean;
+        result_list["sigma_mu_sd"] = sigma_mu_sd;
+    }
+
+    return result_list;
 }

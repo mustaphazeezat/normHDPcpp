@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 #include <vector>
+#include "mean_dispersion_horseshoe.h"
 
 // Structure for acceptance probabilities
 struct AcceptanceRates {
@@ -27,6 +28,9 @@ struct NormHDPResult {
     std::vector<Eigen::MatrixXd> phi_star_1_J_output;
     std::vector<std::vector<Eigen::VectorXd>> Beta_output;
 
+    //Horseshoe parameters output (only saved if use_sparse_prior = true)
+    std::vector<HorseshoeParams> horseshoe_output;
+
     // Diagnostics
     AcceptanceRates acceptance_rates;
 
@@ -34,6 +38,7 @@ struct NormHDPResult {
     int D;
     std::vector<int> C;
     int G;
+    bool use_sparse_prior;
 };
 
 // Main MCMC function
@@ -52,6 +57,7 @@ NormHDPResult normHDP_mcmc(
     bool print_Z = false,
     int num_cores = 4,
     bool save_only_z = false,
+    bool use_sparse_prior = true,
     const Eigen::VectorXd& baynorm_mu_estimate = Eigen::VectorXd(),
     const Eigen::VectorXd& baynorm_phi_estimate = Eigen::VectorXd(),
     const std::vector<Eigen::VectorXd>& baynorm_beta = std::vector<Eigen::VectorXd>()

@@ -12,8 +12,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // ensemble_mcmc_R
-Rcpp::List ensemble_mcmc_R(Rcpp::List Y, int J, int num_chains, int chain_length, int thinning, bool empirical, int burn_in, bool quadratic, int iter_update, double beta_mean, double alpha_mu_2, double adaptive_prop, bool print_progress, int num_cores, Rcpp::NumericVector baynorm_mu_estimate, Rcpp::NumericVector baynorm_phi_estimate, Rcpp::List baynorm_beta_list);
-RcppExport SEXP _normHDPcpp_ensemble_mcmc_R(SEXP YSEXP, SEXP JSEXP, SEXP num_chainsSEXP, SEXP chain_lengthSEXP, SEXP thinningSEXP, SEXP empiricalSEXP, SEXP burn_inSEXP, SEXP quadraticSEXP, SEXP iter_updateSEXP, SEXP beta_meanSEXP, SEXP alpha_mu_2SEXP, SEXP adaptive_propSEXP, SEXP print_progressSEXP, SEXP num_coresSEXP, SEXP baynorm_mu_estimateSEXP, SEXP baynorm_phi_estimateSEXP, SEXP baynorm_beta_listSEXP) {
+Rcpp::List ensemble_mcmc_R(Rcpp::List Y, int J, int num_chains, int chain_length, int thinning, bool empirical, int burn_in, bool quadratic, int iter_update, double beta_mean, double alpha_mu_2, double adaptive_prop, bool print_progress, int num_cores, bool save_only_z, bool use_sparse_prior, Rcpp::NumericVector baynorm_mu_estimate, Rcpp::NumericVector baynorm_phi_estimate, Rcpp::List baynorm_beta_list);
+RcppExport SEXP _normHDPcpp_ensemble_mcmc_R(SEXP YSEXP, SEXP JSEXP, SEXP num_chainsSEXP, SEXP chain_lengthSEXP, SEXP thinningSEXP, SEXP empiricalSEXP, SEXP burn_inSEXP, SEXP quadraticSEXP, SEXP iter_updateSEXP, SEXP beta_meanSEXP, SEXP alpha_mu_2SEXP, SEXP adaptive_propSEXP, SEXP print_progressSEXP, SEXP num_coresSEXP, SEXP save_only_zSEXP, SEXP use_sparse_priorSEXP, SEXP baynorm_mu_estimateSEXP, SEXP baynorm_phi_estimateSEXP, SEXP baynorm_beta_listSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -31,10 +31,12 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type adaptive_prop(adaptive_propSEXP);
     Rcpp::traits::input_parameter< bool >::type print_progress(print_progressSEXP);
     Rcpp::traits::input_parameter< int >::type num_cores(num_coresSEXP);
+    Rcpp::traits::input_parameter< bool >::type save_only_z(save_only_zSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_sparse_prior(use_sparse_priorSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type baynorm_mu_estimate(baynorm_mu_estimateSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type baynorm_phi_estimate(baynorm_phi_estimateSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type baynorm_beta_list(baynorm_beta_listSEXP);
-    rcpp_result_gen = Rcpp::wrap(ensemble_mcmc_R(Y, J, num_chains, chain_length, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, print_progress, num_cores, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta_list));
+    rcpp_result_gen = Rcpp::wrap(ensemble_mcmc_R(Y, J, num_chains, chain_length, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, print_progress, num_cores, save_only_z, use_sparse_prior, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta_list));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -75,7 +77,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_normHDPcpp_ensemble_mcmc_R", (DL_FUNC) &_normHDPcpp_ensemble_mcmc_R, 17},
+    {"_normHDPcpp_ensemble_mcmc_R", (DL_FUNC) &_normHDPcpp_ensemble_mcmc_R, 19},
     {"_normHDPcpp_normHDP_mcmc_fixed_z", (DL_FUNC) &_normHDPcpp_normHDP_mcmc_fixed_z, 15},
     {"_normHDPcpp_rcpp_hello_world", (DL_FUNC) &_normHDPcpp_rcpp_hello_world, 0},
     {NULL, NULL, 0}

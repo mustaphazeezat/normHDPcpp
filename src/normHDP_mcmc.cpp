@@ -7,6 +7,7 @@
 #include "includes/unique_parameters.h"
 #include "includes/capture_efficiencies.h"
 #include "includes/mean_dispersion.h"
+#include "includes/mean_dispersion_horseshoe.h"
 #include "includes/utils.h"
 #include <iostream>
 #include <cmath>
@@ -27,6 +28,7 @@ NormHDPResult normHDP_mcmc(
     bool print_Z,
     int num_cores,
     bool save_only_z,
+    bool use_sparse_prior,  // NEW PARAMETER
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
     const std::vector<Eigen::VectorXd>& baynorm_beta
@@ -38,20 +40,20 @@ NormHDPResult normHDP_mcmc(
     for (int d = 0; d < D; ++d) {
         C[d] = Y[d].cols();
     }
-    
+
     // ============ BayNorm Estimates (passed from R) ============
     Eigen::VectorXd mu_estimate = baynorm_mu_estimate;
     Eigen::VectorXd phi_estimate = baynorm_phi_estimate;
     std::vector<Eigen::VectorXd> Beta_estimate = baynorm_beta;
-    
+
     // Replace zeros with small values
     for (int g = 0; g < G; ++g) {
         if (mu_estimate(g) == 0) mu_estimate(g) = 0.01;
         if (phi_estimate(g) == 0) phi_estimate(g) = 0.01;
     }
-    
+
     // ============ Hyper-parameters ============
-    
+
     // alpha_mu_2
     if (alpha_mu_2 < 0) {
         double sum_log_mu = 0.0;
@@ -64,21 +66,21 @@ NormHDPResult normHDP_mcmc(
         }
         alpha_mu_2 = 2.0 * std::log(sum_log_mu / count);
     }
-    
+
     // a_d_beta, b_d_beta
     Eigen::VectorXd a_d_beta(D);
     Eigen::VectorXd b_d_beta(D);
-    
+
     for (int d = 0; d < D; ++d) {
         double baynorm_mean_capeff = beta_mean;
         double baynorm_var_capeff = 0.5;
         double a_beta, b_beta;
-        
+
         do {
-            a_beta = ((1.0 - baynorm_mean_capeff) / baynorm_var_capeff - 
+            a_beta = ((1.0 - baynorm_mean_capeff) / baynorm_var_capeff -
                      1.0 / baynorm_mean_capeff) * baynorm_mean_capeff * baynorm_mean_capeff;
             b_beta = a_beta * (1.0 / baynorm_mean_capeff - 1.0);
-            
+
             if (baynorm_var_capeff >= baynorm_mean_capeff * (1.0 - baynorm_mean_capeff) ||
                 a_beta < 1.0 || b_beta < 1.0) {
                 baynorm_var_capeff /= 2.0;
@@ -86,33 +88,33 @@ NormHDPResult normHDP_mcmc(
                 break;
             }
         } while (true);
-        
+
         a_d_beta(d) = a_beta;
         b_d_beta(d) = b_beta;
     }
-    
+
     // Regression parameters v_1, v_2, m_b
     double v_1, v_2;
     Eigen::VectorXd m_b;
-    
+
     // Fit linear model (simplified - could use weighted least squares)
     std::vector<double> x_vals, y_vals;
     for (int g = 0; g < G; ++g) {
-        if (std::isfinite(std::log(mu_estimate(g))) && 
+        if (std::isfinite(std::log(mu_estimate(g))) &&
             std::isfinite(std::log(phi_estimate(g)))) {
             x_vals.push_back(std::log(mu_estimate(g)));
             y_vals.push_back(std::log(phi_estimate(g)));
         }
     }
-    
+
     int n_valid = x_vals.size();
     Eigen::VectorXd y_vec(n_valid);
     Eigen::MatrixXd X_mat;
-    
+
     for (int i = 0; i < n_valid; ++i) {
         y_vec(i) = y_vals[i];
     }
-    
+
     if (quadratic) {
         X_mat.resize(n_valid, 3);
         for (int i = 0; i < n_valid; ++i) {
@@ -131,11 +133,11 @@ NormHDPResult normHDP_mcmc(
         m_b.resize(2);
         m_b << -1.0, 2.0;
     }
-    
+
     Eigen::VectorXd coef = (X_mat.transpose() * X_mat).ldlt().solve(X_mat.transpose() * y_vec);
     Eigen::VectorXd resid = y_vec - X_mat * coef;
     double rse_squared = resid.squaredNorm() / (n_valid - coef.size());
-    
+
     if (empirical) {
         m_b = coef;
         double variance = 5.0;
@@ -145,11 +147,18 @@ NormHDPResult normHDP_mcmc(
         v_1 = 2.0;
         v_2 = 1.0;
     }
-    
+
+    // ============ Initialize Horseshoe Parameters (if using sparse prior) ============
+    HorseshoeParams horseshoe_params;
+    if (use_sparse_prior) {
+        horseshoe_params = initialize_horseshoe_params(J, G);
+        std::cout << "Using horseshoe sparse prior for cluster-specific means\n";
+    }
+
     // ============ Initial Values ============
     Eigen::VectorXd b_initial = m_b;
     double alpha_phi_2_initial = rse_squared;
-    
+
     // Random allocation
     std::vector<std::vector<int>> Z_initial(D);
     for (int d = 0; d < D; ++d) {
@@ -159,27 +168,28 @@ NormHDPResult normHDP_mcmc(
             Z_initial[d][c] = dist(rng_local);
         }
     }
-    
+
     Eigen::MatrixXd P_J_D_initial = Eigen::MatrixXd::Constant(J, D, 1.0 / J);
     Eigen::VectorXd P_initial = Eigen::VectorXd::Constant(J, 1.0 / J);
     double alpha_initial = 1.0;
     double alpha_zero_initial = 1.0;
-    
+
     Eigen::MatrixXd mu_star_1_J_initial(J, G);
     Eigen::MatrixXd phi_star_1_J_initial(J, G);
     for (int j = 0; j < J; ++j) {
         mu_star_1_J_initial.row(j) = mu_estimate.transpose();
         phi_star_1_J_initial.row(j) = phi_estimate.transpose();
     }
-    
+
     // ============ Prepare Outputs ============
     int num_saved = (number_iter - burn_in) / thinning;
-    
+
     NormHDPResult result;
     result.D = D;
     result.C = C;
     result.G = G;
-    
+    result.use_sparse_prior = use_sparse_prior;  // Store flag
+
     if (!save_only_z) {
         result.b_output.reserve(num_saved);
         result.alpha_phi2_output.reserve(num_saved);
@@ -190,16 +200,21 @@ NormHDPResult normHDP_mcmc(
         result.mu_star_1_J_output.reserve(num_saved);
         result.phi_star_1_J_output.reserve(num_saved);
         result.Beta_output.reserve(num_saved);
+
+        // Reserve space for horseshoe parameters if using sparse prior
+        if (use_sparse_prior) {
+            result.horseshoe_output.reserve(num_saved);
+        }
     }
     result.Z_output.reserve(num_saved);
-    
+
     // Acceptance rates
     result.acceptance_rates.P_accept.resize(number_iter - 1, 0.0);
     result.acceptance_rates.alpha_accept.resize(number_iter - 1, 0.0);
     result.acceptance_rates.alpha_zero_accept.resize(number_iter - 1, 0.0);
     result.acceptance_rates.unique_accept.resize(number_iter - 1, 0.0);
     result.acceptance_rates.Beta_accept.resize(number_iter - 1, 0.0);
-    
+
     // ============ Set Initial Values as Current ============
     Eigen::VectorXd b_new = b_initial;
     double alpha_phi_2_new = alpha_phi_2_initial;
@@ -211,13 +226,13 @@ NormHDPResult normHDP_mcmc(
     Eigen::MatrixXd mu_star_1_J_new = mu_star_1_J_initial;
     Eigen::MatrixXd phi_star_1_J_new = phi_star_1_J_initial;
     std::vector<Eigen::VectorXd> Beta_new = Beta_estimate;
-    
+
     // Acceptance counters
     int P_count = 0, alpha_count = 0, alpha_zero_count = 0;
     int unique_count = 0, Beta_count = 0;
-    
+
     // ============ Covariance Structures ============
-    
+
     // Component probabilities
     Eigen::RowVectorXd mean_X_component_new(J - 1);
     for (int j = 0; j < J - 1; ++j) {
@@ -225,42 +240,42 @@ NormHDPResult normHDP_mcmc(
     }
     Eigen::MatrixXd tilde_s_component_new = mean_X_component_new.transpose() * mean_X_component_new;
     Eigen::MatrixXd covariance_component_new = Eigen::MatrixXd::Zero(J - 1, J - 1);
-    
+
     // Alpha
     double mean_X_alpha_new = std::log(alpha_new);
     double M_2_alpha_new = 0.0;
     double variance_alpha_new = 0.0;
-    
+
     // Alpha zero
     double mean_X_alpha_zero_new = std::log(alpha_zero_new);
     double M_2_alpha_zero_new = 0.0;
     double variance_alpha_zero_new = 0.0;
-    
+
     // Unique parameters
     std::vector<std::vector<Eigen::MatrixXd>> covariance_unique_new(J);
     std::vector<std::vector<Eigen::MatrixXd>> tilde_s_unique_new(J);
     std::vector<std::vector<Eigen::RowVectorXd>> mean_X_unique_new(J);
-    
+
     for (int j = 0; j < J; ++j) {
         covariance_unique_new[j].resize(G);
         tilde_s_unique_new[j].resize(G);
         mean_X_unique_new[j].resize(G);
-        
+
         for (int g = 0; g < G; ++g) {
             covariance_unique_new[j][g] = Eigen::Matrix2d::Zero();
-            
+
             Eigen::Vector2d x_vec;
             x_vec << std::log(mu_star_1_J_new(j, g)), std::log(phi_star_1_J_new(j, g));
             tilde_s_unique_new[j][g] = x_vec * x_vec.transpose();
             mean_X_unique_new[j][g] = x_vec.transpose();
         }
     }
-    
+
     // Capture efficiencies
     std::vector<Eigen::VectorXd> variance_capture_new(D);
     std::vector<Eigen::VectorXd> mean_X_capture_new(D);
     std::vector<Eigen::VectorXd> M_2_capture_new(D);
-    
+
     for (int d = 0; d < D; ++d) {
         variance_capture_new[d] = Eigen::VectorXd::Zero(C[d]);
         M_2_capture_new[d] = Eigen::VectorXd::Zero(C[d]);
@@ -269,28 +284,46 @@ NormHDPResult normHDP_mcmc(
             mean_X_capture_new[d](c) = std::log(Beta_new[d](c) / (1.0 - Beta_new[d](c)));
         }
     }
-    
+
     // ============ MCMC Iterations ============
     std::cout << "Starting MCMC with " << number_iter << " iterations...\n";
-    
+
     for (int iter = 2; iter <= number_iter; ++iter) {
-        
+
         if (iter % iter_update == 0) {
             std::cout << "Iteration: " << iter << " / " << number_iter << std::endl;
         }
-        
-        // 1) Regression parameters
-        auto mean_disp_output = mean_dispersion_mcmc(mu_star_1_J_new, phi_star_1_J_new,
-                                                     v_1, v_2, m_b, quadratic);
-        alpha_phi_2_new = mean_disp_output.alpha_phi_2;
-        b_new = mean_disp_output.b;
-        
+
+        // 1) Regression parameters - CHOOSE BASED ON use_sparse_prior
+        if (use_sparse_prior) {
+            // Use horseshoe prior version
+            auto mean_disp_output = mean_dispersion_horseshoe_mcmc(
+                mu_star_1_J_new,
+                phi_star_1_J_new,
+                mu_estimate,  // Baseline expression
+                horseshoe_params,
+                v_1, v_2, m_b, quadratic
+            );
+            alpha_phi_2_new = mean_disp_output.alpha_phi_2;
+            b_new = mean_disp_output.b;
+            horseshoe_params = mean_disp_output.horseshoe_params;  // Update horseshoe params
+        } else {
+            // Use standard version (no sparsity)
+            auto mean_disp_output = mean_dispersion_mcmc(
+                mu_star_1_J_new,
+                phi_star_1_J_new,
+                v_1, v_2, m_b, quadratic
+            );
+            alpha_phi_2_new = mean_disp_output.alpha_phi_2;
+            b_new = mean_disp_output.b;
+        }
+
         // 2) Allocation variables
         auto alloc_output = allocation_variables_mcmc(P_J_D_new, mu_star_1_J_new,
                                                      phi_star_1_J_new, Y, Beta_new,
                                                      iter, num_cores);
         Z_new = alloc_output.Z;
-        
+
         if (print_Z) {
             for (int d = 0; d < D; ++d) {
                 std::cout << "Dataset " << d << " cluster counts: ";
@@ -300,10 +333,10 @@ NormHDPResult normHDP_mcmc(
                 std::cout << std::endl;
             }
         }
-        
+
         // 3) Dataset-specific probabilities
         P_J_D_new = dataset_specific_mcmc(Z_new, P_new, alpha_new);
-        
+
         // 4) Component probabilities
         auto comp_output = component_probabilities_mcmc(P_new, P_J_D_new, alpha_zero_new,
                                                        alpha_new, covariance_component_new,
@@ -315,7 +348,7 @@ NormHDPResult normHDP_mcmc(
         covariance_component_new = comp_output.covariance_new;
         P_count += comp_output.accept;
         result.acceptance_rates.P_accept[iter - 2] = (double)P_count / (iter - 1);
-        
+
         // 5) Alpha
         auto alpha_output = alpha_mcmc(P_J_D_new, P_new, alpha_new, mean_X_alpha_new,
                                       M_2_alpha_new, variance_alpha_new, iter, adaptive_prop);
@@ -325,7 +358,7 @@ NormHDPResult normHDP_mcmc(
         variance_alpha_new = alpha_output.variance_new;
         alpha_count += alpha_output.accept;
         result.acceptance_rates.alpha_accept[iter - 2] = (double)alpha_count / (iter - 1);
-        
+
         // 6) Alpha zero
         auto alpha_zero_output = alpha_zero_mcmc(P_new, alpha_zero_new, mean_X_alpha_zero_new,
                                                 M_2_alpha_zero_new, variance_alpha_zero_new,
@@ -336,7 +369,7 @@ NormHDPResult normHDP_mcmc(
         variance_alpha_zero_new = alpha_zero_output.variance_new;
         alpha_zero_count += alpha_zero_output.accept;
         result.acceptance_rates.alpha_zero_accept[iter - 2] = (double)alpha_zero_count / (iter - 1);
-        
+
         // 7) Unique parameters
         auto unique_output = unique_parameters_mcmc(mu_star_1_J_new, phi_star_1_J_new,
                                                    mean_X_unique_new, tilde_s_unique_new,
@@ -350,7 +383,7 @@ NormHDPResult normHDP_mcmc(
         covariance_unique_new = unique_output.covariance_new;
         unique_count += unique_output.accept_count;
         result.acceptance_rates.unique_accept[iter - 2] = (double)unique_count / ((iter - 1) * J * G);
-        
+
         // 8) Capture efficiencies
         auto capture_output = capture_efficiencies_mcmc(Beta_new, Y, Z_new, mu_star_1_J_new,
                                                        phi_star_1_J_new, a_d_beta, b_d_beta,
@@ -364,11 +397,11 @@ NormHDPResult normHDP_mcmc(
         int total_cells = 0;
         for (int c_val : C) total_cells += c_val;
         result.acceptance_rates.Beta_accept[iter - 2] = (double)Beta_count / ((iter - 1) * total_cells);
-        
+
         // 9) Save outputs
         if (iter >= burn_in && (iter - burn_in) % thinning == 0) {
             result.Z_output.push_back(Z_new);
-            
+
             if (!save_only_z) {
                 result.b_output.push_back(b_new);
                 result.alpha_phi2_output.push_back(alpha_phi_2_new);
@@ -379,6 +412,11 @@ NormHDPResult normHDP_mcmc(
                 result.mu_star_1_J_output.push_back(mu_star_1_J_new);
                 result.phi_star_1_J_output.push_back(phi_star_1_J_new);
                 result.Beta_output.push_back(Beta_new);
+
+                // Save horseshoe parameters if using sparse prior
+                if (use_sparse_prior) {
+                    result.horseshoe_output.push_back(horseshoe_params);
+                }
             }
         }
     }

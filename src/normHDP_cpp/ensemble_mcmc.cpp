@@ -18,6 +18,7 @@ std::mutex progress_mutex;
 
 // FIXED: Proper SEXP handling to avoid stack imbalance
 struct ChainResult {
+    // SAVE FULL TRACES instead of just final values
     std::vector<Eigen::VectorXd> b_output;
     std::vector<double> alpha_phi2_output;
     std::vector<Eigen::MatrixXd> P_J_D_output;
@@ -28,8 +29,8 @@ struct ChainResult {
     std::vector<Eigen::MatrixXd> phi_star_1_J_output;
     std::vector<std::vector<Eigen::VectorXd>> Beta_output;
     std::vector<std::vector<std::vector<int>>> Z_output;
-    std::vector<HorseshoeParams> horseshoe_output;  // NEW
-    bool use_sparse_prior;  // NEW
+    std::vector<HorseshoeParams> horseshoe_output;  // NEW: Full trace
+    bool use_sparse_prior;
     int D;
 };
 
@@ -46,7 +47,7 @@ ChainResult run_single_chain_safe(
     double alpha_mu_2,
     double adaptive_prop,
     bool save_only_z,
-    bool use_sparse_prior,
+    bool use_sparse_prior,  // NEW
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
     const std::vector<Eigen::VectorXd>& baynorm_beta,
@@ -68,7 +69,7 @@ ChainResult run_single_chain_safe(
         false,   // print_Z
         1,       // num_cores per chain (parallelism at chain level)
         save_only_z,
-        use_sparse_prior,
+        use_sparse_prior,  // NEW
         baynorm_mu_estimate,
         baynorm_phi_estimate,
         baynorm_beta
@@ -147,7 +148,7 @@ Rcpp::List ensemble_mcmc_R(
     bool print_progress,
     int num_cores,
     bool save_only_z,
-    bool use_sparse_prior,
+    bool use_sparse_prior,  // NEW
     Rcpp::NumericVector baynorm_mu_estimate,
     Rcpp::NumericVector baynorm_phi_estimate,
     Rcpp::List baynorm_beta_list
@@ -240,10 +241,34 @@ Rcpp::List ensemble_mcmc_R(
     // FIXED: Now convert to R objects AFTER all threads are done
     Rcpp::List Z_trace_all(num_chains);
 
+    // NEW: Also save parameter traces if not save_only_z
+    Rcpp::List b_trace_all, alpha_trace_all, alpha_zero_trace_all;
+    Rcpp::List alpha_phi2_trace_all, P_trace_all;
+    Rcpp::List mu_trace_all, phi_trace_all, Beta_trace_all;
+    Rcpp::List lambda_trace_all, tau_trace_all, sigma_mu_trace_all;
+
+    if (!save_only_z) {
+        b_trace_all = Rcpp::List(num_chains);
+        alpha_trace_all = Rcpp::List(num_chains);
+        alpha_zero_trace_all = Rcpp::List(num_chains);
+        alpha_phi2_trace_all = Rcpp::List(num_chains);
+        P_trace_all = Rcpp::List(num_chains);
+        mu_trace_all = Rcpp::List(num_chains);
+        phi_trace_all = Rcpp::List(num_chains);
+        Beta_trace_all = Rcpp::List(num_chains);
+
+        if (use_sparse_prior) {
+            lambda_trace_all = Rcpp::List(num_chains);
+            tau_trace_all = Rcpp::List(num_chains);
+            sigma_mu_trace_all = Rcpp::List(num_chains);
+        }
+    }
+
     for (int i = 0; i < num_chains; i++) {
         const auto& result = chain_results[i];
         int n_samples = result.Z_output.size();
 
+        // Save Z traces
         Rcpp::List Z_trace_i(n_samples);
         for (int t = 0; t < n_samples; t++) {
             Rcpp::List Z_t(D);
@@ -253,6 +278,65 @@ Rcpp::List ensemble_mcmc_R(
             Z_trace_i[t] = Z_t;
         }
         Z_trace_all[i] = Z_trace_i;
+
+        // Save parameter traces (if not save_only_z)
+        if (!save_only_z && n_samples > 0) {
+            // b trace
+            b_trace_all[i] = Rcpp::wrap(result.b_output);
+
+            // alpha trace
+            alpha_trace_all[i] = Rcpp::wrap(result.alpha_output);
+
+            // alpha_zero trace
+            alpha_zero_trace_all[i] = Rcpp::wrap(result.alpha_zero_output);
+
+            // alpha_phi2 trace
+            alpha_phi2_trace_all[i] = Rcpp::wrap(result.alpha_phi2_output);
+
+            // P trace
+            P_trace_all[i] = Rcpp::wrap(result.P_output);
+
+            // mu trace
+            mu_trace_all[i] = Rcpp::wrap(result.mu_star_1_J_output);
+
+            // phi trace
+            phi_trace_all[i] = Rcpp::wrap(result.phi_star_1_J_output);
+
+            // Beta trace
+            Beta_trace_all[i] = Rcpp::wrap(result.Beta_output);
+
+            // Horseshoe traces (if sparse prior)
+            if (use_sparse_prior && !result.horseshoe_output.empty()) {
+                int n_hs_samples = result.horseshoe_output.size();
+
+                // Lambda trace
+                Rcpp::List lambda_chain(n_hs_samples);
+                for (int t = 0; t < n_hs_samples; t++) {
+                    Eigen::MatrixXd lambda_mat(J, G);
+                    for (int j = 0; j < J; j++) {
+                        lambda_mat.row(j) = result.horseshoe_output[t].lambda[j].transpose();
+                    }
+                    lambda_chain[t] = lambda_mat;
+                }
+                lambda_trace_all[i] = lambda_chain;
+
+                // Tau trace
+                Eigen::MatrixXd tau_mat(n_hs_samples, J);
+                for (int t = 0; t < n_hs_samples; t++) {
+                    for (int j = 0; j < J; j++) {
+                        tau_mat(t, j) = result.horseshoe_output[t].tau[j];
+                    }
+                }
+                tau_trace_all[i] = tau_mat;
+
+                // Sigma_mu trace
+                Eigen::VectorXd sigma_mu_vec(n_hs_samples);
+                for (int t = 0; t < n_hs_samples; t++) {
+                    sigma_mu_vec(t) = result.horseshoe_output[t].sigma_mu;
+                }
+                sigma_mu_trace_all[i] = sigma_mu_vec;
+            }
+        }
     }
 
     Rcpp::Rcout << "All chains completed. Computing ensemble statistics...\n";
@@ -459,6 +543,11 @@ Rcpp::List ensemble_mcmc_R(
         Rcpp::_["Beta_sd"] = Beta_sd,
         Rcpp::_["Z_consensus"] = Z_consensus,
         Rcpp::_["coclustering"] = coclustering,
+		Rcpp::_["b_trace_all"] = b_trace_all,
+    	Rcpp::_["alpha_trace_all"] = alpha_trace_all,
+    	Rcpp::_["alpha_zero_trace_all"] = alpha_zero_trace_all,
+    	Rcpp::_["mu_trace_all"] = mu_trace_all,
+    	Rcpp::_["phi_trace_all"] = phi_trace_all,
         Rcpp::_["Z_trace_all"] = Z_trace_all,
         Rcpp::_["use_sparse_prior"] = use_sparse_prior
     );
@@ -471,6 +560,9 @@ Rcpp::List ensemble_mcmc_R(
         result_list["tau_sd"] = tau_sd;
         result_list["sigma_mu_mean"] = sigma_mu_mean;
         result_list["sigma_mu_sd"] = sigma_mu_sd;
+		result_list["lambda_trace_all"] = lambda_trace_all;
+    	result_list["tau_trace_all"] = tau_trace_all;
+    	result_list["sigma_mu_trace_all"] = sigma_mu_trace_all;
     }
 
     return result_list;

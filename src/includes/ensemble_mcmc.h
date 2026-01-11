@@ -10,52 +10,55 @@ struct EnsembleResult {
     // Averaged posterior estimates
     Eigen::VectorXd b_mean;
     Eigen::VectorXd b_sd;
-
     double alpha_phi2_mean;
     double alpha_phi2_sd;
-
-    Eigen::MatrixXd P_J_D_mean;  // J x D
+    Eigen::MatrixXd P_J_D_mean;
     Eigen::MatrixXd P_J_D_sd;
-
-    Eigen::VectorXd P_mean;  // J
+    Eigen::VectorXd P_mean;
     Eigen::VectorXd P_sd;
-
     double alpha_mean;
     double alpha_sd;
-
     double alpha_zero_mean;
     double alpha_zero_sd;
-
-    Eigen::MatrixXd mu_star_1_J_mean;  // J x G
+    Eigen::MatrixXd mu_star_1_J_mean;
     Eigen::MatrixXd mu_star_1_J_sd;
-
-    Eigen::MatrixXd phi_star_1_J_mean;  // J x G
+    Eigen::MatrixXd phi_star_1_J_mean;
     Eigen::MatrixXd phi_star_1_J_sd;
-
-    std::vector<Eigen::VectorXd> Beta_mean;  // D datasets
+    std::vector<Eigen::VectorXd> Beta_mean;
     std::vector<Eigen::VectorXd> Beta_sd;
 
+    // --- Horseshoe Summary (NEW) ---
+    Eigen::MatrixXd lambda_mean;
+    Eigen::MatrixXd lambda_sd;
+    Eigen::VectorXd tau_mean;
+    Eigen::VectorXd tau_sd;
+    double sigma_mu_mean;
+    double sigma_mu_sd;
+
+    // --- Trace Storage (NEW: Required for R traces) ---
+    // These will hold the raw samples for every chain
+    std::vector<std::vector<Eigen::VectorXd>> b_trace_all;
+    std::vector<std::vector<double>> alpha_trace_all;
+    std::vector<std::vector<double>> alpha_zero_trace_all;
+    std::vector<std::vector<Eigen::MatrixXd>> mu_trace_all;
+    std::vector<std::vector<Eigen::MatrixXd>> phi_trace_all;
+
+    // Horseshoe Traces
+    std::vector<std::vector<Eigen::MatrixXd>> lambda_trace_all; // Chains x Samples x Matrix
+    std::vector<Eigen::MatrixXd> tau_trace_all;                // Chains x (Samples x J matrix)
+    std::vector<Eigen::VectorXd> sigma_mu_trace_all;           // Chains x Samples vector
+
+    // --- Clustering & Dimensions ---
     // Consensus cluster assignments (most frequent across chains)
     std::vector<std::vector<int>> Z_consensus;
-
     // Co-clustering matrix for each dataset (probability two cells in same cluster)
     std::vector<Eigen::MatrixXd> coclustering_matrices;
-
-    // Overall acceptance rates (averaged across chains)
-    double P_accept_mean;
-    double alpha_accept_mean;
-    double alpha_zero_accept_mean;
-    double unique_accept_mean;
-    double Beta_accept_mean;
-
-    // Dimensions
     int D;
     std::vector<int> C;
     int G;
     int J;
-
-    // Number of chains
     int num_chains;
+    bool use_sparse_prior;
 };
 
 // Run ensemble MCMC: multiple chains in parallel, then average

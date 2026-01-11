@@ -27,17 +27,17 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="45abbb6e-6eaf-4cc1-802a-be6b2dd0fc11" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/mean_dispersion_horseshoe.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../R/RcppExports.R" beforeDir="false" afterPath="$PROJECT_DIR$/../R/RcppExports.R" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/editor.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/editor.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../.idea/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../.idea/editor.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../.idea/modules.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../.idea/normhdpcpp_package.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/../../normHDPcpp_0.0.1.tar.gz" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/RcppExports.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/RcppExports.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/RcppExports.o" beforeDir="false" afterPath="$PROJECT_DIR$/RcppExports.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/ensemble_mcmc.o" beforeDir="false" afterPath="$PROJECT_DIR$/ensemble_mcmc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/includes/normHDP_mcmc.h" beforeDir="false" afterPath="$PROJECT_DIR$/includes/normHDP_mcmc.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/normHDP_cpp/ensemble_mcmc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/normHDP_cpp/ensemble_mcmc.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/normHDP_mcmc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/normHDP_mcmc.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/includes/mean_dispersion_horseshoe.h" beforeDir="false" afterPath="$PROJECT_DIR$/includes/mean_dispersion_horseshoe.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mean_dispersion_horseshoe.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/mean_dispersion_horseshoe.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mean_dispersion_horseshoe.o" beforeDir="false" afterPath="$PROJECT_DIR$/mean_dispersion_horseshoe.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/normHDP_mcmc.o" beforeDir="false" afterPath="$PROJECT_DIR$/normHDP_mcmc.o" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/normHDPcpp.so" beforeDir="false" afterPath="$PROJECT_DIR$/normHDPcpp.so" afterDir="false" />
     </list>
@@ -113,7 +113,7 @@
       <updated>1763798991841</updated>
       <workItem from="1763798992891" duration="6250000" />
       <workItem from="1764946378346" duration="34967000" />
-      <workItem from="1765120764970" duration="3233000" />
+      <workItem from="1765120764970" duration="5173000" />
     </task>
     <servers />
   </component>

@@ -4,13 +4,20 @@
 #include <RcppEigen.h>
 #include <vector>
 
-// Horseshoe prior parameters structure
+// tau_j ~ Half-Cauchy(0, tau_0)
+// tau_0 ~ Half-Cauchy(0, 1)  ← LEARN THIS FROM DATA
+
+// Updated structure with tau hyperprior
 struct HorseshoeParams {
-    std::vector<Eigen::VectorXd> lambda;  // J x G local shrinkage parameters
-    std::vector<Eigen::VectorXd> nu;      // J x G auxiliary variables for lambda
-    std::vector<double> tau;               // J global shrinkage parameters (one per cluster)
-    std::vector<double> xi;                // J auxiliary variables for tau
-    double sigma_mu;                       // Overall variance parameter
+    std::vector<Eigen::VectorXd> lambda;  // J x G local shrinkage
+    std::vector<Eigen::VectorXd> nu;      // J x G auxiliary for lambda
+    std::vector<double> tau;               // J global shrinkage per cluster
+    std::vector<double> xi;                // J auxiliary for tau
+    double sigma_mu;                       // Overall variance
+
+    // NEW: Hyperprior for tau
+    double tau_0;                          // Global hyperprior (learned)
+    double xi_tau_0;                       // Auxiliary for tau_0
 };
 
 // Result structure
@@ -18,6 +25,7 @@ struct MeanDispersionHorseshoeResult {
     double alpha_phi_2;
     Eigen::VectorXd b;
     HorseshoeParams horseshoe_params;
+	double log_likelihood;
 };
 
 // Main MCMC update function with horseshoe prior

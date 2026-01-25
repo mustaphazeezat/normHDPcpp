@@ -8,6 +8,8 @@
 #include "includes/capture_efficiencies.h"
 #include "includes/mean_dispersion.h"
 #include "includes/mean_dispersion_horseshoe.h"
+#include "includes/mean_dispersion_spike_slab.h"
+#include "includes/mean_dispersion_regularized_horseshoe.h"
 #include "includes/utils.h"
 #include <iostream>
 #include <cmath>
@@ -28,7 +30,10 @@ NormHDPResult normHDP_mcmc(
     bool print_Z,
     int num_cores,
     bool save_only_z,
-    bool use_sparse_prior,  // NEW PARAMETER
+    bool use_sparse_prior,
+	bool use_spike_slab,
+	bool use_reg_horseshoe,
+    double p_0,
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
     const std::vector<Eigen::VectorXd>& baynorm_beta
@@ -148,11 +153,26 @@ NormHDPResult normHDP_mcmc(
         v_2 = 1.0;
     }
 
+	 // Initialize spike-slab parameters (if using)
+    SpikeSlabParams spike_slab_params;
+    if (use_spike_slab) {
+        spike_slab_params = initialize_spike_slab_params(J, G);
+        std::cout << "Using spike-and-slab prior for cluster-specific means\n";
+    }
+
     // ============ Initialize Horseshoe Parameters (if using sparse prior) ============
     HorseshoeParams horseshoe_params;
     if (use_sparse_prior) {
         horseshoe_params = initialize_horseshoe_params(J, G);
         std::cout << "Using horseshoe sparse prior for cluster-specific means\n";
+    }
+
+	RegularizedHorseshoeParams reg_horseshoe_params;
+    if (use_reg_horseshoe) {
+        reg_horseshoe_params = initialize_regularized_horseshoe_params(J, G, p_0);
+        std::cout << "Using regularized horseshoe prior for cluster-specific means\n";
+        std::cout << "  Expected non-zero effects per cluster: " << p_0 << "\n";
+        std::cout << "  Initial c_squared (slab variance): " << reg_horseshoe_params.c_squared << "\n";
     }
 
     // ============ Initial Values ============
@@ -189,6 +209,8 @@ NormHDPResult normHDP_mcmc(
     result.C = C;
     result.G = G;
     result.use_sparse_prior = use_sparse_prior;  // Store flag
+	result.use_spike_slab = use_spike_slab;
+	result.use_reg_horseshoe = use_reg_horseshoe;
 
     if (!save_only_z) {
         result.b_output.reserve(num_saved);
@@ -204,6 +226,9 @@ NormHDPResult normHDP_mcmc(
         // Reserve space for horseshoe parameters if using sparse prior
         if (use_sparse_prior) {
             result.horseshoe_output.reserve(num_saved);
+        }
+		if (use_reg_horseshoe) {  // ADD THIS BLOCK
+            result.reg_horseshoe_output.reserve(num_saved);
         }
     }
     result.Z_output.reserve(num_saved);
@@ -293,9 +318,34 @@ NormHDPResult normHDP_mcmc(
         if (iter % iter_update == 0) {
             std::cout << "Iteration: " << iter << " / " << number_iter << std::endl;
         }
+		// Regression parameters - CHOOSE MODEL
+		if (use_reg_horseshoe) {
+            // Use regularized horseshoe version
+            auto mean_disp_output = mean_dispersion_regularized_horseshoe_mcmc(
+                mu_star_1_J_new,
+                phi_star_1_J_new,
+                mu_estimate,  // Baseline
+                reg_horseshoe_params,
+                v_1, v_2, m_b, quadratic
+            );
+            alpha_phi_2_new = mean_disp_output.alpha_phi_2;
+            b_new = mean_disp_output.b;
+            reg_horseshoe_params = mean_disp_output.rhs_params;
 
-        // 1) Regression parameters - CHOOSE BASED ON use_sparse_prior
-        if (use_sparse_prior) {
+        } else if (use_spike_slab) {
+            // Use spike-and-slab version
+            auto mean_disp_output = mean_dispersion_spike_slab_mcmc(
+                mu_star_1_J_new,
+                phi_star_1_J_new,
+                mu_estimate,  // Baseline
+                spike_slab_params,
+                v_1, v_2, m_b, quadratic
+            );
+            alpha_phi_2_new = mean_disp_output.alpha_phi_2;
+            b_new = mean_disp_output.b;
+            spike_slab_params = mean_disp_output.spike_slab_params;
+
+        } else if (use_sparse_prior) {
             // Use horseshoe prior version
             auto mean_disp_output = mean_dispersion_horseshoe_mcmc(
                 mu_star_1_J_new,
@@ -317,6 +367,7 @@ NormHDPResult normHDP_mcmc(
             alpha_phi_2_new = mean_disp_output.alpha_phi_2;
             b_new = mean_disp_output.b;
         }
+
 
         // 2) Allocation variables
         auto alloc_output = allocation_variables_mcmc(P_J_D_new, mu_star_1_J_new,
@@ -416,6 +467,12 @@ NormHDPResult normHDP_mcmc(
                 // Save horseshoe parameters if using sparse prior
                 if (use_sparse_prior) {
                     result.horseshoe_output.push_back(horseshoe_params);
+                }
+				if (use_spike_slab) {
+                    result.spike_slab_output.push_back(spike_slab_params);
+                }
+				if (use_reg_horseshoe) {
+                    result.reg_horseshoe_output.push_back(reg_horseshoe_params);
                 }
             }
         }

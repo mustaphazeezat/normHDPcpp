@@ -2,6 +2,8 @@
 #include <RcppEigen.h>
 #include "includes/normHDP_mcmc.h"
 #include "includes/mean_dispersion_horseshoe.h"
+#include "includes/mean_dispersion_spike_slab.h"
+#include "includes/mean_dispersion_regularized_horseshoe.h"
 #include "includes/utils.h"
 #include <iostream>
 #include <thread>
@@ -29,8 +31,12 @@ struct ChainResult {
     std::vector<Eigen::MatrixXd> phi_star_1_J_output;
     std::vector<std::vector<Eigen::VectorXd>> Beta_output;
     std::vector<std::vector<std::vector<int>>> Z_output;
-    std::vector<HorseshoeParams> horseshoe_output;  // NEW: Full trace
+    std::vector<HorseshoeParams> horseshoe_output;
+	std::vector<SpikeSlabParams> spike_slab_output;
+	std::vector<RegularizedHorseshoeParams> reg_horseshoe_output;
     bool use_sparse_prior;
+	bool use_spike_slab;
+	bool use_reg_horseshoe;
     int D;
 };
 
@@ -47,7 +53,10 @@ ChainResult run_single_chain_safe(
     double alpha_mu_2,
     double adaptive_prop,
     bool save_only_z,
-    bool use_sparse_prior,  // NEW
+    bool use_sparse_prior,
+	bool use_spike_slab,
+	bool use_reg_horseshoe,
+    double p_0,
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
     const std::vector<Eigen::VectorXd>& baynorm_beta,
@@ -69,7 +78,10 @@ ChainResult run_single_chain_safe(
         false,   // print_Z
         1,       // num_cores per chain (parallelism at chain level)
         save_only_z,
-        use_sparse_prior,  // NEW
+        use_sparse_prior,
+		use_spike_slab,
+		use_reg_horseshoe,
+        p_0,
         baynorm_mu_estimate,
         baynorm_phi_estimate,
         baynorm_beta
@@ -92,8 +104,12 @@ ChainResult run_single_chain_safe(
     chain_result.phi_star_1_J_output = result.phi_star_1_J_output;
     chain_result.Beta_output = result.Beta_output;
     chain_result.Z_output = result.Z_output;
-    chain_result.horseshoe_output = result.horseshoe_output;  // NEW
-    chain_result.use_sparse_prior = result.use_sparse_prior;  // NEW
+    chain_result.horseshoe_output = result.horseshoe_output;
+	chain_result.spike_slab_output = result.spike_slab_output;
+	chain_result.reg_horseshoe_output = result.reg_horseshoe_output;
+    chain_result.use_sparse_prior = result.use_sparse_prior;
+	chain_result.use_spike_slab = result.use_spike_slab;
+	chain_result.use_reg_horseshoe = result.use_reg_horseshoe;
     chain_result.D = result.D;
 
     return chain_result;
@@ -148,12 +164,15 @@ Rcpp::List ensemble_mcmc_R(
     bool print_progress,
     int num_cores,
     bool save_only_z,
-    bool use_sparse_prior,  // NEW
+    bool use_sparse_prior,
+	bool use_spike_slab,
+	bool use_reg_horseshoe,
+    double p_0,
     Rcpp::NumericVector baynorm_mu_estimate,
     Rcpp::NumericVector baynorm_phi_estimate,
     Rcpp::List baynorm_beta_list
 ) {
-    // FIXED: Convert all R objects to C++ BEFORE threading
+    // Convert all R objects to C++ BEFORE threading
     int D = Y.size();
 
     std::vector<Eigen::MatrixXd> Y_vec(D);
@@ -191,7 +210,12 @@ Rcpp::List ensemble_mcmc_R(
     Rcpp::Rcout << "  Datasets:          " << D << "\n";
     Rcpp::Rcout << "  Genes:             " << G << "\n";
     Rcpp::Rcout << "  Clusters:          " << J << "\n";
-    Rcpp::Rcout << "  Sparse prior:      " << (use_sparse_prior ? "YES" : "NO") << "\n";
+    Rcpp::Rcout << "  Sparse prior:      " << (use_sparse_prior ? "Horseshoe" : "NO") << "\n";
+    Rcpp::Rcout << "  Spike-Slab prior:  " << (use_spike_slab ? "spike slab" : "NO") << "\n";
+	Rcpp::Rcout << "  Reg-Horseshoe:     " << (use_reg_horseshoe ? "reg. horseshoe" : "NO") << "\n";
+    if (use_reg_horseshoe) {
+        Rcpp::Rcout << "    p_0 (sparsity):  " << p_0 << "\n";
+    }
     Rcpp::Rcout << std::string(70, '=') << "\n\n";
 
     // Start timing
@@ -216,7 +240,7 @@ Rcpp::List ensemble_mcmc_R(
                 chain_results[i] = run_single_chain_safe(
                     Y_vec, J, chain_length, thinning, empirical, burn_in, quadratic,
                     beta_mean, alpha_mu_2, adaptive_prop, save_only_z, use_sparse_prior,
-                    mu_vec, phi_vec, baynorm_beta,
+                    use_spike_slab, use_reg_horseshoe, p_0, mu_vec, phi_vec, baynorm_beta,
                     i, print_progress
                 );
             });
@@ -238,10 +262,10 @@ Rcpp::List ensemble_mcmc_R(
         }
     }
 
-    // FIXED: Now convert to R objects AFTER all threads are done
+    // convert to R objects AFTER all threads are done
     Rcpp::List Z_trace_all(num_chains);
 
-    // NEW: Also save parameter traces if not save_only_z
+    // save parameter traces if not save_only_z
     Rcpp::List b_trace_all, alpha_trace_all, alpha_zero_trace_all;
     Rcpp::List alpha_phi2_trace_all, P_trace_all;
     Rcpp::List mu_trace_all, phi_trace_all, Beta_trace_all;
@@ -336,6 +360,9 @@ Rcpp::List ensemble_mcmc_R(
                 }
                 sigma_mu_trace_all[i] = sigma_mu_vec;
             }
+
+
+
         }
     }
 
@@ -437,6 +464,96 @@ Rcpp::List ensemble_mcmc_R(
         compute_mean_sd(lambda_samples, lambda_mean, lambda_sd);
         compute_mean_sd(tau_samples, tau_mean, tau_sd);
         compute_scalar_mean_sd(sigma_mu_samples, sigma_mu_mean, sigma_mu_sd);
+    }
+	 // ===== SPIKE-AND-SLAB PARAMETER AVERAGING =====
+    Eigen::MatrixXd gamma_mean, gamma_sd;
+    double pi_mean = 0.0, pi_sd = 0.0;
+    double sigma_slab_mean = 0.0, sigma_slab_sd = 0.0;
+
+    if (use_spike_slab && !chain_results[0].spike_slab_output.empty()) {
+        Rcpp::Rcout << "Computing spike-and-slab parameter statistics...\n";
+
+        // Collect spike-slab samples from all chains (last sample from each chain)
+        std::vector<Eigen::MatrixXd> gamma_samples;
+        std::vector<double> pi_samples;
+        std::vector<double> sigma_slab_samples;
+
+        for (int i = 0; i < num_chains; i++) {
+            const auto& r = chain_results[i];
+            int last = r.spike_slab_output.size() - 1;
+            if (last < 0) continue;
+
+            const auto& ss = r.spike_slab_output[last];
+
+            // Convert gamma vectors to matrix
+            Eigen::MatrixXd gamma_mat(J, G);
+            for (int j = 0; j < J; j++) {
+                gamma_mat.row(j) = ss.gamma[j].col(0).transpose();
+            }
+            gamma_samples.push_back(gamma_mat);
+
+            pi_samples.push_back(ss.pi);
+            sigma_slab_samples.push_back(ss.sigma_slab);
+        }
+
+        // Compute means and SDs
+        compute_mean_sd(gamma_samples, gamma_mean, gamma_sd);
+        compute_scalar_mean_sd(pi_samples, pi_mean, pi_sd);
+        compute_scalar_mean_sd(sigma_slab_samples, sigma_slab_mean, sigma_slab_sd);
+    }
+
+	// ===== REGULARIZED HORSESHOE PARAMETER AVERAGING =====
+    Eigen::MatrixXd rhs_lambda_mean, rhs_lambda_sd;
+    Eigen::VectorXd rhs_tau_mean, rhs_tau_sd;
+    double rhs_tau_0_mean = 0.0, rhs_tau_0_sd = 0.0;
+    double rhs_sigma_mu_mean = 0.0, rhs_sigma_mu_sd = 0.0;
+    double rhs_c_squared_mean = 0.0, rhs_c_squared_sd = 0.0;
+    double rhs_p_0_mean = 0.0, rhs_p_0_sd = 0.0;
+
+    if (use_reg_horseshoe && !chain_results[0].reg_horseshoe_output.empty()) {
+        Rcpp::Rcout << "Computing regularized horseshoe parameter statistics...\n";
+
+        std::vector<Eigen::MatrixXd> rhs_lambda_samples;
+        std::vector<Eigen::VectorXd> rhs_tau_samples;
+        std::vector<double> rhs_tau_0_samples;
+        std::vector<double> rhs_sigma_mu_samples;
+        std::vector<double> rhs_c_squared_samples;
+        std::vector<double> rhs_p_0_samples;
+
+        for (int i = 0; i < num_chains; i++) {
+            const auto& r = chain_results[i];
+            int last = r.reg_horseshoe_output.size() - 1;
+            if (last < 0) continue;
+
+            const auto& rhs = r.reg_horseshoe_output[last];
+
+            // Convert lambda
+            Eigen::MatrixXd lambda_mat(J, G);
+            for (int j = 0; j < J; j++) {
+                lambda_mat.row(j) = rhs.lambda[j].transpose();
+            }
+            rhs_lambda_samples.push_back(lambda_mat);
+
+            // Convert tau
+            Eigen::VectorXd tau_vec(J);
+            for (int j = 0; j < J; j++) {
+                tau_vec(j) = rhs.tau[j];
+            }
+            rhs_tau_samples.push_back(tau_vec);
+
+            rhs_tau_0_samples.push_back(rhs.tau_0);
+            rhs_sigma_mu_samples.push_back(rhs.sigma_mu);
+            rhs_c_squared_samples.push_back(rhs.c_squared);
+            rhs_p_0_samples.push_back(rhs.p_0);
+        }
+
+        // Compute means and SDs
+        compute_mean_sd(rhs_lambda_samples, rhs_lambda_mean, rhs_lambda_sd);
+        compute_mean_sd(rhs_tau_samples, rhs_tau_mean, rhs_tau_sd);
+        compute_scalar_mean_sd(rhs_tau_0_samples, rhs_tau_0_mean, rhs_tau_0_sd);
+        compute_scalar_mean_sd(rhs_sigma_mu_samples, rhs_sigma_mu_mean, rhs_sigma_mu_sd);
+        compute_scalar_mean_sd(rhs_c_squared_samples, rhs_c_squared_mean, rhs_c_squared_sd);
+        compute_scalar_mean_sd(rhs_p_0_samples, rhs_p_0_mean, rhs_p_0_sd);
     }
 
     // ===== CONSENSUS CLUSTERING =====
@@ -549,7 +666,9 @@ Rcpp::List ensemble_mcmc_R(
     	Rcpp::_["mu_trace_all"] = mu_trace_all,
     	Rcpp::_["phi_trace_all"] = phi_trace_all,
         Rcpp::_["Z_trace_all"] = Z_trace_all,
-        Rcpp::_["use_sparse_prior"] = use_sparse_prior
+        Rcpp::_["use_sparse_prior"] = use_sparse_prior,
+		Rcpp::_["use_spike_slab"] = use_spike_slab,
+		Rcpp::_["use_reg_horseshoe"] = use_reg_horseshoe
     );
 
     // Add horseshoe parameters if sparse prior was used
@@ -563,6 +682,30 @@ Rcpp::List ensemble_mcmc_R(
 		result_list["lambda_trace_all"] = lambda_trace_all;
     	result_list["tau_trace_all"] = tau_trace_all;
     	result_list["sigma_mu_trace_all"] = sigma_mu_trace_all;
+    }
+
+	 if (use_spike_slab && gamma_mean.size() > 0) {
+        result_list["gamma_mean"] = gamma_mean;
+        result_list["gamma_sd"] = gamma_sd;
+        result_list["pi_mean"] = pi_mean;
+        result_list["pi_sd"] = pi_sd;
+        result_list["sigma_slab_mean"] = sigma_slab_mean;
+        result_list["sigma_slab_sd"] = sigma_slab_sd;
+    }
+
+	if (use_reg_horseshoe && rhs_lambda_mean.size() > 0) {
+        result_list["rhs_lambda_mean"] = rhs_lambda_mean;
+        result_list["rhs_lambda_sd"] = rhs_lambda_sd;
+        result_list["rhs_tau_mean"] = rhs_tau_mean;
+        result_list["rhs_tau_sd"] = rhs_tau_sd;
+        result_list["rhs_tau_0_mean"] = rhs_tau_0_mean;
+        result_list["rhs_tau_0_sd"] = rhs_tau_0_sd;
+        result_list["rhs_sigma_mu_mean"] = rhs_sigma_mu_mean;
+        result_list["rhs_sigma_mu_sd"] = rhs_sigma_mu_sd;
+        result_list["rhs_c_squared_mean"] = rhs_c_squared_mean;
+        result_list["rhs_c_squared_sd"] = rhs_c_squared_sd;
+        result_list["rhs_p_0_mean"] = rhs_p_0_mean;
+        result_list["rhs_p_0_sd"] = rhs_p_0_sd;
     }
 
     return result_list;

@@ -16,8 +16,8 @@ struct HorseshoeParams {
     double sigma_mu;                       // Overall variance
 
     // NEW: Hyperprior for tau
-    double tau_0;                          // Global hyperprior (learned)
-    double xi_tau_0;                       // Auxiliary for tau_0
+   // double tau_0;                          // Global hyperprior (learned)
+    //double xi_tau_0;                       // Auxiliary for tau_0
 };
 
 // Result structure

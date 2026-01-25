@@ -48,6 +48,20 @@ struct EnsembleResult {
     std::vector<Eigen::MatrixXd> tau_trace_all;                // Chains x (Samples x J matrix)
     std::vector<Eigen::VectorXd> sigma_mu_trace_all;           // Chains x Samples vector
 
+	// --- Spike-and-Slab Summary (NEW) ---
+    Eigen::MatrixXd gamma_mean;      // Posterior Inclusion Probabilities (J x G)
+    Eigen::MatrixXd gamma_sd;
+    double pi_mean;                  // Averaged sparsity parameter
+    double pi_sd;
+    double sigma_slab_mean;          // Averaged slab variance
+    double sigma_slab_sd;
+
+    // --- Spike-and-Slab Traces (NEW) ---
+    // Chains x Samples x Matrix/Value
+    std::vector<std::vector<Eigen::MatrixXd>> gamma_trace_all;
+    std::vector<std::vector<double>> pi_trace_all;
+    std::vector<std::vector<double>> sigma_slab_trace_all;
+
     // --- Clustering & Dimensions ---
     // Consensus cluster assignments (most frequent across chains)
     std::vector<std::vector<int>> Z_consensus;
@@ -59,6 +73,7 @@ struct EnsembleResult {
     int J;
     int num_chains;
     bool use_sparse_prior;
+	bool use_spike_slab;
 };
 
 // Run ensemble MCMC: multiple chains in parallel, then average

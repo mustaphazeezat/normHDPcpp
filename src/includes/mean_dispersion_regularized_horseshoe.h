@@ -15,15 +15,15 @@ struct RegularizedHorseshoeParams {
     std::vector<double> tau;              // Global shrinkage per cluster (J values)
     std::vector<double> xi;               // Auxiliary for tau
     double tau_0;                         // Overall global scale
-    double xi_tau_0;                      // Auxiliary for tau_0
+    double xi_0;                          // Auxiliary for tau_0 (FIXED: was xi_tau_0)
     double sigma_mu;                      // Overall variance scale
     double c_squared;                     // Slab variance (regularization parameter)
-
-    // Effective number of non-zero coefficients (prior guess)
-    double p_0;
+    double p_0;                           // Effective number of non-zero coefficients
 };
 
+// ========================================
 // Result structure
+// ========================================
 struct MeanDispersionRegularizedHorseshoeResult {
     double alpha_phi_2;
     Eigen::VectorXd b;
@@ -31,9 +31,27 @@ struct MeanDispersionRegularizedHorseshoeResult {
     double log_likelihood;
 };
 
+// ========================================
 // Function declarations
-RegularizedHorseshoeParams initialize_regularized_horseshoe_params(int J, int G, double p_0);
+// ========================================
 
+// Standard initialization (default hyperparameters)
+RegularizedHorseshoeParams initialize_regularized_horseshoe_params(
+    int J,
+    int G,
+    double p_0
+);
+
+// Empirical initialization (data-driven hyperparameters)
+RegularizedHorseshoeParams initialize_regularized_horseshoe_params_empirical(
+    int J,
+    int G,
+    double p_0,
+    const Eigen::VectorXd& mu_baseline,
+    const Eigen::MatrixXd& mu_initial
+);
+
+// MCMC update function
 MeanDispersionRegularizedHorseshoeResult mean_dispersion_regularized_horseshoe_mcmc(
     const Eigen::MatrixXd& mu_star_1_J,
     const Eigen::MatrixXd& phi_star_1_J,

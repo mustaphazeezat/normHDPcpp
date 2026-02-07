@@ -1,3 +1,8 @@
+// ============================================================================
+// CORRECTED: mean_dispersion_horseshoe.cpp
+// Changes: Standardized prior hyperparameters for consistency
+// ============================================================================
+
 #include "includes/mean_dispersion_horseshoe.h"
 #include "includes/utils.h"
 #include <cmath>
@@ -117,10 +122,11 @@ MeanDispersionHorseshoeResult mean_dispersion_horseshoe_mcmc(
         }
     }
 
+    // *** CHANGED: Standardized prior hyperparameters ***
     // sigma_mu^2 ~ InvGamma(a_sigma + J*G/2, b_sigma + sum_all/2)
-    // Using weak prior to let data determine scale
-    double a_sigma = 1.0;   // Weak prior shape
-    double b_sigma = 0.01;  // Weak prior scale
+    // Using minimally informative prior to let data dominate
+    double a_sigma = 3.0;   // CHANGED from 2.0 (minimally informative shape)
+    double b_sigma = 2.0;  // CHANGED from 1.0 (minimally informative scale)
 
     double shape_sigma = a_sigma + (J * G) / 2.0;
     double rate_sigma = b_sigma + sum_all / 2.0;
@@ -186,17 +192,41 @@ MeanDispersionHorseshoeResult mean_dispersion_horseshoe_mcmc(
     // Least squares: b = (X'X)^-1 X'y
     Eigen::VectorXd b_hat = (X.transpose() * X).ldlt().solve(X.transpose() * y);
 
-    // Sample alpha_phi_2 from inverse gamma
-    double shape = v_1 / 2.0;
-    double scale = v_2 / 2.0;
+    // Using the previous iteration's alpha_phi_2 or initialize if first call
+static double alpha_phi_2_current = 1.0;  // Holds state between calls
 
-    std::gamma_distribution<double> gamma_dist(shape, 1.0 / scale);
-    double gamma_sample = gamma_dist(rng_local);
-    double alpha_phi_2 = 1.0 / gamma_sample;
+Eigen::MatrixXd XtX = X.transpose() * X;
+Eigen::VectorXd Xty = X.transpose() * y;
 
-    // Sample b from multivariate normal
-    Eigen::MatrixXd cov_b = alpha_phi_2 * (X.transpose() * X).inverse();
-    Eigen::VectorXd b_new = rmvnorm(b_hat, cov_b);
+// Prior precision (inverse of prior covariance)
+// Using weakly informative prior: N(m_b, V_b * I)
+double prior_var_b = 100.0;  // Large variance = weak prior
+Eigen::MatrixXd prior_precision = (1.0 / prior_var_b) * Eigen::MatrixXd::Identity(m_b.size(), m_b.size());
+
+// Posterior precision = prior precision + (1/alpha_phi_2) * X'X
+Eigen::MatrixXd posterior_precision = prior_precision + (1.0 / alpha_phi_2_current) * XtX;
+Eigen::MatrixXd posterior_cov = posterior_precision.inverse();
+
+// Posterior mean = posterior_cov * (prior_precision * m_b + (1/alpha_phi_2) * X'y)
+Eigen::VectorXd posterior_mean = posterior_cov * (prior_precision * m_b + (1.0 / alpha_phi_2_current) * Xty);
+
+// Sample b from multivariate normal
+Eigen::VectorXd b_new = rmvnorm(posterior_mean, posterior_cov);
+
+// Step 2: Sample alpha_phi_2 from its conditional posterior (given b_new)
+Eigen::VectorXd residuals = y - X * b_new;
+double RSS = residuals.squaredNorm();
+
+// Posterior: alpha_phi_2 ~ InvGamma((v_1 + n)/2, (v_2 + RSS)/2)
+double shape_post = (v_1 + n) / 2.0;
+double rate_post = (v_2 + RSS) / 2.0;
+
+std::gamma_distribution<double> gamma_dist(shape_post, 1.0 / rate_post);
+double gamma_sample = gamma_dist(rng_local);
+double alpha_phi_2 = 1.0 / gamma_sample;
+
+// Update state for next iteration
+alpha_phi_2_current = alpha_phi_2;
 
     // ============================================================
     // 5. Return results
@@ -256,6 +286,69 @@ HorseshoeParams initialize_horseshoe_params(int J, int G) {
 
     // Initialize overall variance
     params.sigma_mu = 1.0;
+
+    return params;
+}
+
+HorseshoeParams initialize_horseshoe_params_empirical(
+    int J, int G,
+    const Eigen::VectorXd& mu_baseline,
+    const Eigen::MatrixXd& mu_initial
+) {
+    HorseshoeParams params;
+
+    params.lambda.resize(J);
+    params.nu.resize(J);
+    for (int j = 0; j < J; j++) {
+        params.lambda[j] = Eigen::VectorXd::Ones(G);
+        params.nu[j] = Eigen::VectorXd::Ones(G);
+    }
+    params.tau.resize(J, 1.0);
+    params.xi.resize(J, 1.0);
+
+    // Estimate σ_μ from variance of DEVIATIONS from baseline
+    std::vector<double> all_variances;
+
+    for (int g = 0; g < G; ++g) {
+        if (mu_baseline(g) <= 0) continue;
+
+        std::vector<double> deltas;
+        for (int j = 0; j < J; ++j) {
+            if (mu_initial(j, g) > 0) {
+                // Deviation = log(cluster_mean) - log(baseline)
+                double delta = std::log(mu_initial(j, g)) - std::log(mu_baseline(g));
+                if (std::isfinite(delta)) {
+                    deltas.push_back(delta);
+                }
+            }
+        }
+
+        if (deltas.size() > 1) {
+            double mean = 0.0;
+            for (double d : deltas) mean += d;
+            mean /= deltas.size();
+
+            double var = 0.0;
+            for (double d : deltas) {
+                var += (d - mean) * (d - mean);
+            }
+            var /= (deltas.size() - 1);
+
+            if (std::isfinite(var) && var > 0) {
+                all_variances.push_back(var);
+            }
+        }
+    }
+
+    // Set σ_μ to median variance
+    if (all_variances.size() > 0) {
+        std::sort(all_variances.begin(), all_variances.end());
+        double median_var = all_variances[all_variances.size() / 2];
+        params.sigma_mu = std::sqrt(median_var);
+        params.sigma_mu = std::max(0.5, std::min(params.sigma_mu, 2.0));
+    } else {
+        params.sigma_mu = 1.0;
+    }
 
     return params;
 }

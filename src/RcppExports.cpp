@@ -44,8 +44,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // normHDP_mcmc_fixed_z
-Rcpp::List normHDP_mcmc_fixed_z(const std::vector<Eigen::MatrixXd>& Y, const std::vector<std::vector<int>>& cluster_estimates, int number_iter, int thinning, bool empirical, int burn_in, bool quadratic, int iter_update, double beta_mean, double alpha_mu_2, double adaptive_prop, int num_cores, SEXP baynorm_mu_estimate, SEXP baynorm_phi_estimate, SEXP baynorm_beta);
-RcppExport SEXP _normHDPcpp_normHDP_mcmc_fixed_z(SEXP YSEXP, SEXP cluster_estimatesSEXP, SEXP number_iterSEXP, SEXP thinningSEXP, SEXP empiricalSEXP, SEXP burn_inSEXP, SEXP quadraticSEXP, SEXP iter_updateSEXP, SEXP beta_meanSEXP, SEXP alpha_mu_2SEXP, SEXP adaptive_propSEXP, SEXP num_coresSEXP, SEXP baynorm_mu_estimateSEXP, SEXP baynorm_phi_estimateSEXP, SEXP baynorm_betaSEXP) {
+Rcpp::List normHDP_mcmc_fixed_z(const std::vector<Eigen::MatrixXd>& Y, const std::vector<std::vector<int>>& cluster_estimates, int number_iter, int thinning, bool empirical, int burn_in, bool quadratic, int iter_update, double beta_mean, double alpha_mu_2, double adaptive_prop, int num_cores, SEXP baynorm_mu_estimate, SEXP baynorm_phi_estimate, SEXP baynorm_beta, bool use_horseshoe, bool use_reg_horseshoe, bool use_spike_slab, double horseshoe_p0);
+RcppExport SEXP _normHDPcpp_normHDP_mcmc_fixed_z(SEXP YSEXP, SEXP cluster_estimatesSEXP, SEXP number_iterSEXP, SEXP thinningSEXP, SEXP empiricalSEXP, SEXP burn_inSEXP, SEXP quadraticSEXP, SEXP iter_updateSEXP, SEXP beta_meanSEXP, SEXP alpha_mu_2SEXP, SEXP adaptive_propSEXP, SEXP num_coresSEXP, SEXP baynorm_mu_estimateSEXP, SEXP baynorm_phi_estimateSEXP, SEXP baynorm_betaSEXP, SEXP use_horseshoeSEXP, SEXP use_reg_horseshoeSEXP, SEXP use_spike_slabSEXP, SEXP horseshoe_p0SEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -64,7 +64,11 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< SEXP >::type baynorm_mu_estimate(baynorm_mu_estimateSEXP);
     Rcpp::traits::input_parameter< SEXP >::type baynorm_phi_estimate(baynorm_phi_estimateSEXP);
     Rcpp::traits::input_parameter< SEXP >::type baynorm_beta(baynorm_betaSEXP);
-    rcpp_result_gen = Rcpp::wrap(normHDP_mcmc_fixed_z(Y, cluster_estimates, number_iter, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, num_cores, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta));
+    Rcpp::traits::input_parameter< bool >::type use_horseshoe(use_horseshoeSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_reg_horseshoe(use_reg_horseshoeSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_spike_slab(use_spike_slabSEXP);
+    Rcpp::traits::input_parameter< double >::type horseshoe_p0(horseshoe_p0SEXP);
+    rcpp_result_gen = Rcpp::wrap(normHDP_mcmc_fixed_z(Y, cluster_estimates, number_iter, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, num_cores, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta, use_horseshoe, use_reg_horseshoe, use_spike_slab, horseshoe_p0));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -81,7 +85,7 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_normHDPcpp_ensemble_mcmc_R", (DL_FUNC) &_normHDPcpp_ensemble_mcmc_R, 22},
-    {"_normHDPcpp_normHDP_mcmc_fixed_z", (DL_FUNC) &_normHDPcpp_normHDP_mcmc_fixed_z, 15},
+    {"_normHDPcpp_normHDP_mcmc_fixed_z", (DL_FUNC) &_normHDPcpp_normHDP_mcmc_fixed_z, 19},
     {"_normHDPcpp_rcpp_hello_world", (DL_FUNC) &_normHDPcpp_rcpp_hello_world, 0},
     {NULL, NULL, 0}
 };

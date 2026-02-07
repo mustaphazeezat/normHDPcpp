@@ -35,6 +35,8 @@ struct NormHDPResult {
     //Horseshoe parameters output (only saved if use_sparse_prior = true)
     std::vector<HorseshoeParams> horseshoe_output;
 	std::vector<RegularizedHorseshoeParams> reg_horseshoe_output;
+    std::vector<Eigen::VectorXd> eta_output;
+    std::vector<double> sigma_eta_sq_output
 
     // Diagnostics
     AcceptanceRates acceptance_rates;
@@ -70,7 +72,9 @@ NormHDPResult normHDP_mcmc(
     double p_0 = 100,
     const Eigen::VectorXd& baynorm_mu_estimate = Eigen::VectorXd(),
     const Eigen::VectorXd& baynorm_phi_estimate = Eigen::VectorXd(),
-    const std::vector<Eigen::VectorXd>& baynorm_beta = std::vector<Eigen::VectorXd>()
+    const std::vector<Eigen::VectorXd>& baynorm_beta = std::vector<Eigen::VectorXd>(),
+    bool use_time_effect,
+    const std::vector<Eigen::VectorXd>& pseudotime_vec
 );
 
 #endif // NORMHDP_MCMC_H

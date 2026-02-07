@@ -5,8 +5,8 @@ ensemble_mcmc_R <- function(Y, J, num_chains, chain_length, thinning, empirical,
     .Call(`_normHDPcpp_ensemble_mcmc_R`, Y, J, num_chains, chain_length, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, print_progress, num_cores, save_only_z, use_sparse_prior, use_spike_slab, use_reg_horseshoe, p_0, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta_list)
 }
 
-normHDP_mcmc_fixed_z <- function(Y, cluster_estimates, number_iter, thinning = 5L, empirical = TRUE, burn_in = 3000L, quadratic = FALSE, iter_update = 100L, beta_mean = 0.06, alpha_mu_2 = -1.0, adaptive_prop = 0.1, num_cores = 1L, baynorm_mu_estimate = NULL, baynorm_phi_estimate = NULL, baynorm_beta = NULL) {
-    .Call(`_normHDPcpp_normHDP_mcmc_fixed_z`, Y, cluster_estimates, number_iter, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, num_cores, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta)
+normHDP_mcmc_fixed_z <- function(Y, cluster_estimates, number_iter, thinning = 5L, empirical = TRUE, burn_in = 3000L, quadratic = FALSE, iter_update = 100L, beta_mean = 0.06, alpha_mu_2 = -1.0, adaptive_prop = 0.1, num_cores = 1L, baynorm_mu_estimate = NULL, baynorm_phi_estimate = NULL, baynorm_beta = NULL, use_horseshoe = FALSE, use_reg_horseshoe = FALSE, use_spike_slab = FALSE, horseshoe_p0 = 50.0) {
+    .Call(`_normHDPcpp_normHDP_mcmc_fixed_z`, Y, cluster_estimates, number_iter, thinning, empirical, burn_in, quadratic, iter_update, beta_mean, alpha_mu_2, adaptive_prop, num_cores, baynorm_mu_estimate, baynorm_phi_estimate, baynorm_beta, use_horseshoe, use_reg_horseshoe, use_spike_slab, horseshoe_p0)
 }
 
 rcpp_hello_world <- function() {

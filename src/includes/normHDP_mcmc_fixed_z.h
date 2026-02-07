@@ -5,7 +5,7 @@
 #include <vector>
 #include <Eigen/Dense>
 
-// Declaration must match the .cpp definition types exactly
+
 Rcpp::List normHDP_mcmc_fixed_z(
     const std::vector<Eigen::MatrixXd>& Y,
     const std::vector<std::vector<int>>& cluster_estimates,
@@ -21,7 +21,11 @@ Rcpp::List normHDP_mcmc_fixed_z(
     int num_cores,
     Rcpp::NumericVector baynorm_mu_estimate,
     Rcpp::NumericVector baynorm_phi_estimate,
-    Rcpp::List baynorm_beta
+    Rcpp::List baynorm_beta,
+    bool use_horseshoe,
+    bool use_reg_horseshoe,
+    bool use_spike_slab,
+    double horseshoe_p0
 );
 
 #endif // NORMHDP_MCMC_FIXED_Z_H

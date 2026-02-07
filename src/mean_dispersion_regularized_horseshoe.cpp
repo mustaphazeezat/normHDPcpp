@@ -3,6 +3,11 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <numeric>
+
+#ifdef RCPP_VERSION
+#include <Rcpp.h>
+#endif
 
 // ========================================
 // Compute Regularized Shrinkage
@@ -19,7 +24,7 @@ double regularized_tau_sq(double tau_sq, double tau_0_sq, double c_sq) {
 }
 
 // ========================================
-// Initialize Regularized Horseshoe Parameters
+// Initialize Regularized Horseshoe Parameters (Default)
 // ========================================
 
 RegularizedHorseshoeParams initialize_regularized_horseshoe_params(int J, int G, double p_0) {
@@ -39,15 +44,13 @@ RegularizedHorseshoeParams initialize_regularized_horseshoe_params(int J, int G,
 
     // Initialize overall global scale
     params.tau_0 = 1.0;
-    params.xi_tau_0 = 1.0;
+    params.xi_0 = 1.0;
 
     // Initialize overall variance
     params.sigma_mu = 1.0;
 
     // Initialize regularization parameter (slab variance)
-    // Following Piironen & Vehtari: c² = (p_0 / (D - p_0)) × (σ² / n)
-    // For our case: c² set based on expected number of differential genes
-    params.p_0 = p_0;  // Expected number of non-zero effects per cluster
+    params.p_0 = p_0;
 
     // Set c² based on sparsity assumption
     // If p_0 genes are differential out of G total:
@@ -61,12 +64,150 @@ RegularizedHorseshoeParams initialize_regularized_horseshoe_params(int J, int G,
 }
 
 // ========================================
+// Initialize Regularized Horseshoe Parameters (Empirical)
+// ========================================
+
+RegularizedHorseshoeParams initialize_regularized_horseshoe_params_empirical(
+    int J, int G, double p_0,
+    const Eigen::VectorXd& mu_baseline,    // Reference (overall mean across all cells)
+    const Eigen::MatrixXd& mu_initial      // Cluster-specific estimates (J×G from BayNorm)
+) {
+    RegularizedHorseshoeParams params;
+
+    // ============================================================
+    // Initialize all shrinkage parameters to neutral values
+    // ============================================================
+    params.lambda.resize(J);
+    params.nu.resize(J);
+    for (int j = 0; j < J; j++) {
+        params.lambda[j] = Eigen::VectorXd::Ones(G);
+        params.nu[j] = Eigen::VectorXd::Ones(G);
+    }
+    params.tau.resize(J, 1.0);
+    params.xi.resize(J, 1.0);
+    params.tau_0 = 1.0;
+    params.xi_0 = 1.0;
+    params.p_0 = p_0;
+
+    // ============================================================
+    // STEP 1: Estimate σ_μ from variance of log-fold changes
+    // ============================================================
+
+    std::vector<double> all_variances;
+    std::vector<double> all_abs_deltas;
+
+    int genes_with_variation = 0;
+
+    for (int g = 0; g < G; ++g) {
+        // Skip genes with invalid baseline
+        if (mu_baseline(g) <= 0 || !std::isfinite(mu_baseline(g))) {
+            continue;
+        }
+
+        std::vector<double> deltas;
+
+        // Collect deviations from baseline for this gene across all clusters
+        for (int j = 0; j < J; ++j) {
+            if (mu_initial(j, g) > 0 && std::isfinite(mu_initial(j, g))) {
+                // Deviation = log(cluster_mean) - log(baseline)
+                double delta = std::log(mu_initial(j, g)) - std::log(mu_baseline(g));
+
+                if (std::isfinite(delta) && std::abs(delta) < 15.0) {  // Sanity check
+                    deltas.push_back(delta);
+                    all_abs_deltas.push_back(std::abs(delta));
+                }
+            }
+        }
+
+        // Compute variance for this gene (if enough data points)
+        if (deltas.size() > 1) {
+            // Mean deviation for this gene
+            double mean_delta = std::accumulate(deltas.begin(), deltas.end(), 0.0) / deltas.size();
+
+            // Variance of deviations
+            double var = 0.0;
+            for (double d : deltas) {
+                var += (d - mean_delta) * (d - mean_delta);
+            }
+            var /= (deltas.size() - 1);
+
+            if (std::isfinite(var) && var > 0) {
+                all_variances.push_back(var);
+                genes_with_variation++;
+            }
+        }
+    }
+
+    // Estimate σ_μ from median variance (robust to outliers)
+    if (all_variances.size() > 0) {
+        std::sort(all_variances.begin(), all_variances.end());
+        double median_var = all_variances[all_variances.size() / 2];
+
+        // Scale down slightly to account for potential noise in initial estimates
+        params.sigma_mu = std::sqrt(median_var * 0.5);
+
+        // Set reasonable bounds
+        params.sigma_mu = std::max(0.05, std::min(params.sigma_mu, 3.0));
+    } else {
+        params.sigma_mu = 1.0;
+    }
+
+    // ============================================================
+    // STEP 2: Estimate c² from maximum observed log-fold changes
+    // ============================================================
+
+    if (all_abs_deltas.size() > 0) {
+        std::sort(all_abs_deltas.begin(), all_abs_deltas.end());
+
+        // Use 95th percentile to avoid extreme outliers
+        int idx_95 = std::min(
+            static_cast<int>(0.95 * all_abs_deltas.size()),
+            static_cast<int>(all_abs_deltas.size()) - 1
+        );
+        double lfc_95 = all_abs_deltas[idx_95];
+
+        // Also compute 90th percentile for robustness check
+        int idx_90 = std::min(
+            static_cast<int>(0.90 * all_abs_deltas.size()),
+            static_cast<int>(all_abs_deltas.size()) - 1
+        );
+        double lfc_90 = all_abs_deltas[idx_90];
+
+        // Use average of 90th and 95th percentile (more robust)
+        double max_lfc = (lfc_90 + lfc_95) / 2.0;
+
+        // Set c² so that large effects are not over-regularized
+        // If large effects ~ N(0, c²), then ~95% fall within ±2*c
+        // So set c = max_lfc / 2
+        double c = max_lfc / 2.0;
+        params.c_squared = c * c;
+
+        // Set reasonable bounds
+        params.c_squared = std::max(0.5, std::min(params.c_squared, 25.0));
+
+    } else {
+        // Fallback: use formula based on p_0 and G
+        if (p_0 > 0 && p_0 < G) {
+            params.c_squared = (G - p_0) / p_0;
+        } else {
+            params.c_squared = 4.0;
+        }
+    }
+
+    // Ensure c_squared is reasonable
+    params.c_squared = std::max(0.5, std::min(params.c_squared, 25.0));
+
+
+
+    return params;
+}
+
+// ========================================
 // Update tau_0 (overall global hyperprior)
 // ========================================
 
 void update_tau_0_regularized(RegularizedHorseshoeParams& rhs_params, int J) {
-    // tau_0^2 ~ InvGamma(J/2, 1/xi_tau_0 + sum(1/tau²_j) / 2)
-    // Note: We use unregularized tau in the prior for tau_0
+    // tau_0^2 ~ InvGamma(J/2, 1/xi_0 + sum(1/tau²_j) / 2)
 
     double sum_inv_tau_sq = 0.0;
     for (int j = 0; j < J; j++) {
@@ -77,7 +218,7 @@ void update_tau_0_regularized(RegularizedHorseshoeParams& rhs_params, int J) {
     }
 
     double shape = J / 2.0;
-    double rate = 1.0 / rhs_params.xi_tau_0 + sum_inv_tau_sq / 2.0;
+    double rate = 1.0 / rhs_params.xi_0 + sum_inv_tau_sq / 2.0;
 
     // Safeguard
     if (rate < 1e-6) rate = 1e-6;
@@ -90,12 +231,12 @@ void update_tau_0_regularized(RegularizedHorseshoeParams& rhs_params, int J) {
     // Constrain tau_0 to reasonable range
     rhs_params.tau_0 = std::max(0.1, std::min(5.0, rhs_params.tau_0));
 
-    // Update auxiliary variable xi_tau_0
+    // Update auxiliary variable xi_0
     double rate_xi = 1.0 + 1.0 / (rhs_params.tau_0 * rhs_params.tau_0);
 
     std::gamma_distribution<double> gamma_dist_xi(1.0, 1.0 / rate_xi);
     double xi_inv = gamma_dist_xi(rng_local);
-    rhs_params.xi_tau_0 = 1.0 / xi_inv;
+    rhs_params.xi_0 = 1.0 / xi_inv;
 }
 
 // ========================================
@@ -158,8 +299,7 @@ void update_tau_regularized(
         // Constrain tau
         const double MAX_TAU = 5.0;
         const double MIN_TAU = 0.01;
-        if (tau_new > MAX_TAU) tau_new = MAX_TAU;
-        if (tau_new < MIN_TAU) tau_new = MIN_TAU;
+        tau_new = std::max(MIN_TAU, std::min(tau_new, MAX_TAU));
 
         rhs_params.tau[j] = tau_new;
 
@@ -182,13 +322,6 @@ void update_c_squared(
     const Eigen::VectorXd& mu_baseline,
     int J, int G
 ) {
-    // Following Piironen & Vehtari:
-    // c² can be learned from data or fixed based on prior information
-
-    // Option 1: Keep fixed based on sparsity assumption (conservative)
-    // rhs_params.c_squared stays as initialized
-
-    // Option 2: Update based on empirical sparsity (adaptive)
     // Count effective number of "large" deviations
     int count_large = 0;
 
@@ -262,8 +395,7 @@ MeanDispersionRegularizedHorseshoeResult mean_dispersion_regularized_horseshoe_m
             double sigma_mu_sq = rhs_params.sigma_mu * rhs_params.sigma_mu;
             double nu_jg = rhs_params.nu[j](g);
 
-            // Update lambda_jg (standard horseshoe update, regularization applied in likelihood)
-            // λ²_jg ~ InvGamma(1, 1/ν_jg + δ²/(2 × τ² × σ²))
+            // Update lambda_jg
             double rate_lambda = 1.0 / nu_jg +
                                 (delta_jg * delta_jg) / (2.0 * tau_sq * sigma_mu_sq);
 
@@ -293,7 +425,7 @@ MeanDispersionRegularizedHorseshoeResult mean_dispersion_regularized_horseshoe_m
     update_tau_regularized(rhs_params, mu_star_1_J, mu_baseline, J, G);
 
     // ============================================================
-    // 3. Update overall global scale (tau_0, xi_tau_0)
+    // 3. Update overall global scale (tau_0, xi_0)
     // ============================================================
     update_tau_0_regularized(rhs_params, J);
 
@@ -333,7 +465,6 @@ MeanDispersionRegularizedHorseshoeResult mean_dispersion_regularized_horseshoe_m
     }
 
     if (valid_count > 0) {
-        // Normalize to prevent accumulation
         double mean_term = sum_all / valid_count;
 
         double a_sigma = 2.0;
@@ -346,12 +477,11 @@ MeanDispersionRegularizedHorseshoeResult mean_dispersion_regularized_horseshoe_m
         double sigma_mu_sq_inv = gamma_dist_sigma(rng_local);
         rhs_params.sigma_mu = 1.0 / std::sqrt(sigma_mu_sq_inv);
 
-        // Constrain
         rhs_params.sigma_mu = std::max(0.1, std::min(10.0, rhs_params.sigma_mu));
     }
 
     // ============================================================
-    // 6. Update dispersion regression parameters (unchanged)
+    // 6. Update dispersion regression parameters
     // ============================================================
 
     std::vector<double> x_vals, y_vals;

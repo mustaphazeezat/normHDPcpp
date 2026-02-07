@@ -10,6 +10,7 @@
 #include "includes/mean_dispersion_horseshoe.h"
 #include "includes/mean_dispersion_spike_slab.h"
 #include "includes/mean_dispersion_regularized_horseshoe.h"
+#include "includes/time_effects.h"
 #include "includes/utils.h"
 #include <iostream>
 #include <cmath>
@@ -36,7 +37,9 @@ NormHDPResult normHDP_mcmc(
     double p_0,
     const Eigen::VectorXd& baynorm_mu_estimate,
     const Eigen::VectorXd& baynorm_phi_estimate,
-    const std::vector<Eigen::VectorXd>& baynorm_beta
+    const std::vector<Eigen::VectorXd>& baynorm_beta,
+    bool use_time_effect,
+    const std::vector<Eigen::VectorXd>& pseudotime_vec
 ) {
     // ============ Dimensions ============
     int D = Y.size();
@@ -56,21 +59,91 @@ NormHDPResult normHDP_mcmc(
         if (mu_estimate(g) == 0) mu_estimate(g) = 0.01;
         if (phi_estimate(g) == 0) phi_estimate(g) = 0.01;
     }
+    // pseudotime_vec is std::vector<Eigen::VectorXd> passed from R/C++ wrapper
+        TimeEffectParams time_params = initialize_time_effects(G, pseudotime_vec);
+
+     // Hyperparameters for σ²_η prior
+     double a_eta = 2.0;
+     double b_eta = 1.0;
+
+        // Proposal SD for η_g MH updates (tune later)
+        double eta_prop_sd = 0.1;
+    // ============ Compute Baseline Expression (for Horseshoe) ============
+    // Baseline = overall mean expression, used as REFERENCE for deviations
+    Eigen::VectorXd mu_baseline(G);
+    if (use_sparse_prior || use_spike_slab ||use_reg_horseshoe) {
+    // Compute baseline as overall mean across all cells
+    std::cout << "Computing baseline expression for sparse prior...\n";
+
+    for (int g = 0; g < G; ++g) {
+        double sum_expr = 0.0;
+        double total_cells = 0.0;
+
+        for (int d = 0; d < D; ++d) {
+            for (int c = 0; c < C[d]; ++c) {
+                // Raw count divided by size factor gives expression estimate
+                double expr = Y[d](g, c) / Beta_estimate[d](c);
+                sum_expr += expr;
+                total_cells += 1.0;
+            }
+        }
+
+        if (total_cells > 0) {
+            mu_baseline(g) = sum_expr / total_cells;
+        } else {
+            mu_baseline(g) = 0.01;
+        }
+
+        // Ensure positive
+        if (mu_baseline(g) <= 0 || !std::isfinite(mu_baseline(g))) {
+            mu_baseline(g) = 0.01;
+        }
+    }
+
+    std::cout << "Baseline expression computed:\n";
+    std::cout << "  Mean: " << mu_baseline.mean() << "\n";
+    std::cout << "  Range: [" << mu_baseline.minCoeff() << ", "
+              << mu_baseline.maxCoeff() << "]\n\n";
+} else {
+    // For lognormal prior, baseline not needed (but set to avoid issues)
+    mu_baseline = mu_estimate;
+}
+
 
     // ============ Hyper-parameters ============
 
     // alpha_mu_2
     if (alpha_mu_2 < 0) {
-        double sum_log_mu = 0.0;
-        int count = 0;
-        for (int g = 0; g < G; ++g) {
-            if (std::isfinite(std::log(mu_estimate(g)))) {
-                sum_log_mu += mu_estimate(g);
-                count++;
-            }
+    std::vector<double> log_mu_vals;
+
+    for (int g = 0; g < G; ++g) {
+        if (mu_estimate(g) > 0 && std::isfinite(std::log(mu_estimate(g)))) {
+            log_mu_vals.push_back(std::log(mu_estimate(g)));
         }
-        alpha_mu_2 = 2.0 * std::log(sum_log_mu / count);
     }
+
+    if (log_mu_vals.size() > 1) {
+        // Compute mean
+        double mean_log_mu = 0.0;
+        for (double lm : log_mu_vals) mean_log_mu += lm;
+        mean_log_mu /= log_mu_vals.size();
+
+        // Compute variance
+        double var_log_mu = 0.0;
+        for (double lm : log_mu_vals) {
+            var_log_mu += (lm - mean_log_mu) * (lm - mean_log_mu);
+        }
+        var_log_mu /= (log_mu_vals.size() - 1);
+
+        // Set alpha_mu_2 to empirical variance (or scaled version)
+        alpha_mu_2 = var_log_mu;
+
+        std::cout << "Empirical alpha_mu_2: " << alpha_mu_2 << "\n";
+        std::cout << "  (from variance of log(mu_estimate))\n";
+    } else {
+        alpha_mu_2 = 4.0;  // Reasonable default
+    }
+}
 
     // a_d_beta, b_d_beta
     Eigen::VectorXd a_d_beta(D);
@@ -153,28 +226,6 @@ NormHDPResult normHDP_mcmc(
         v_2 = 1.0;
     }
 
-	 // Initialize spike-slab parameters (if using)
-    SpikeSlabParams spike_slab_params;
-    if (use_spike_slab) {
-        spike_slab_params = initialize_spike_slab_params(J, G);
-        std::cout << "Using spike-and-slab prior for cluster-specific means\n";
-    }
-
-    // ============ Initialize Horseshoe Parameters (if using sparse prior) ============
-    HorseshoeParams horseshoe_params;
-    if (use_sparse_prior) {
-        horseshoe_params = initialize_horseshoe_params(J, G);
-        std::cout << "Using horseshoe sparse prior for cluster-specific means\n";
-    }
-
-	RegularizedHorseshoeParams reg_horseshoe_params;
-    if (use_reg_horseshoe) {
-        reg_horseshoe_params = initialize_regularized_horseshoe_params(J, G, p_0);
-        std::cout << "Using regularized horseshoe prior for cluster-specific means\n";
-        std::cout << "  Expected non-zero effects per cluster: " << p_0 << "\n";
-        std::cout << "  Initial c_squared (slab variance): " << reg_horseshoe_params.c_squared << "\n";
-    }
-
     // ============ Initial Values ============
     Eigen::VectorXd b_initial = m_b;
     double alpha_phi_2_initial = rse_squared;
@@ -200,6 +251,65 @@ NormHDPResult normHDP_mcmc(
         mu_star_1_J_initial.row(j) = mu_estimate.transpose();
         phi_star_1_J_initial.row(j) = phi_estimate.transpose();
     }
+     // ============ Initialize Horseshoe Parameters (if using sparse prior) ============
+	SpikeSlabParams spike_slab_params;
+    HorseshoeParams horseshoe_params;
+    RegularizedHorseshoeParams reg_horseshoe_params;  // ← ADD THIS
+
+    if (use_sparse_prior) {
+        if (empirical) {
+            horseshoe_params = initialize_horseshoe_params_empirical(
+                J, G,
+                mu_baseline,           // ← BASELINE (overall mean)
+                mu_star_1_J_initial    // ← INITIAL cluster-specific estimates
+            );
+
+            std::cout << "====================================================\n";
+            std::cout << "EMPIRICAL Horseshoe Initialization\n";
+            std::cout << "====================================================\n";
+            std::cout << "  Baseline: Overall mean expression across cells\n";
+            std::cout << "  Initial estimates: BayNorm cluster-specific means\n";
+            std::cout << "  Estimated from data:\n";
+            std::cout << "    σ_μ (global variance):  " << horseshoe_params.sigma_mu << "\n";
+            std::cout << "====================================================\n\n";
+        } else {
+            horseshoe_params = initialize_horseshoe_params(J, G);
+            std::cout << "Using DEFAULT horseshoe prior\n\n";
+        }
+    }
+
+    if (use_reg_horseshoe) {
+        if (empirical) {
+            reg_horseshoe_params = initialize_regularized_horseshoe_params_empirical(
+                J, G, p_0,
+                mu_baseline,           // ← BASELINE (overall mean)
+                mu_star_1_J_initial    // ← INITIAL cluster-specific estimates
+            );
+
+            std::cout << "====================================================\n";
+            std::cout << "EMPIRICAL Regularized Horseshoe Initialization\n";
+            std::cout << "====================================================\n";
+            std::cout << "  Baseline: Overall mean expression across cells\n";
+            std::cout << "  Initial estimates: BayNorm cluster-specific means\n";
+            std::cout << "  Estimated from data:\n";
+            std::cout << "    σ_μ (global variance): " << reg_horseshoe_params.sigma_mu << "\n";
+            std::cout << "    c² (slab variance):    " << reg_horseshoe_params.c_squared << "\n";
+            std::cout << "    p_0 (# expected diff): " << p_0 << "\n";
+            std::cout << "====================================================\n\n";
+        } else {
+            reg_horseshoe_params = initialize_regularized_horseshoe_params(J, G, p_0);
+            std::cout << "Using DEFAULT regularized horseshoe prior\n";
+            std::cout << "  p_0 (# expected differential genes): " << p_0 << "\n";
+            std::cout << "  c² (slab variance): " << reg_horseshoe_params.c_squared << "\n\n";
+        }
+    }
+	// Initialize spike-slab parameters (if using)
+
+    if (use_spike_slab) {
+        spike_slab_params = initialize_spike_slab_params(J, G);
+        std::cout << "Using spike-and-slab prior for cluster-specific means\n";
+    }
+
 
     // ============ Prepare Outputs ============
     int num_saved = (number_iter - burn_in) / thinning;
@@ -324,7 +434,7 @@ NormHDPResult normHDP_mcmc(
             auto mean_disp_output = mean_dispersion_regularized_horseshoe_mcmc(
                 mu_star_1_J_new,
                 phi_star_1_J_new,
-                mu_estimate,  // Baseline
+                mu_baseline,  // Baseline
                 reg_horseshoe_params,
                 v_1, v_2, m_b, quadratic
             );
@@ -337,7 +447,7 @@ NormHDPResult normHDP_mcmc(
             auto mean_disp_output = mean_dispersion_spike_slab_mcmc(
                 mu_star_1_J_new,
                 phi_star_1_J_new,
-                mu_estimate,  // Baseline
+                mu_baseline,  // Baseline
                 spike_slab_params,
                 v_1, v_2, m_b, quadratic
             );
@@ -350,7 +460,7 @@ NormHDPResult normHDP_mcmc(
             auto mean_disp_output = mean_dispersion_horseshoe_mcmc(
                 mu_star_1_J_new,
                 phi_star_1_J_new,
-                mu_estimate,  // Baseline expression
+                mu_baseline,  // Baseline expression
                 horseshoe_params,
                 v_1, v_2, m_b, quadratic
             );
@@ -422,11 +532,32 @@ NormHDPResult normHDP_mcmc(
         result.acceptance_rates.alpha_zero_accept[iter - 2] = (double)alpha_zero_count / (iter - 1);
 
         // 7) Unique parameters
+        MuPriorType prior_type = MuPriorType::LOGNORMAL;
+        const HorseshoeParams* hs_ptr = nullptr;
+        const RegularizedHorseshoeParams* rhs_ptr = nullptr;
+		const SpikeSlabParams* ss_ptr = nullptr;
+        const Eigen::VectorXd* baseline_ptr = nullptr;
+
+        if (use_reg_horseshoe) {
+                prior_type = MuPriorType::REGULARIZED_HORSESHOE;
+                rhs_ptr = &reg_horseshoe_params;
+                baseline_ptr = &mu_baseline;
+            } else if (use_sparse_prior) {
+                prior_type = MuPriorType::HORSESHOE;
+                hs_ptr = &horseshoe_params;
+                baseline_ptr = &mu_baseline;
+            }else if (use_spike_slab) {
+    			prior_type   = MuPriorType::SPIKE_SLAB;
+    			ss_ptr       = &spike_slab_params;
+    			baseline_ptr = &mu_baseline;
+    		}
+        const TimeEffectParams* te_ptr = time_effect_active ? &time_params : nullptr;
         auto unique_output = unique_parameters_mcmc(mu_star_1_J_new, phi_star_1_J_new,
                                                    mean_X_unique_new, tilde_s_unique_new,
                                                    Z_new, b_new, alpha_phi_2_new, Beta_new,
                                                    alpha_mu_2, covariance_unique_new, iter,
-                                                   quadratic, Y, adaptive_prop, num_cores);
+                                                   quadratic, Y, adaptive_prop, num_cores, prior_type,
+                                                    hs_ptr,rhs_ptr,ss_ptr,baseline_ptr, te_ptr);
         mu_star_1_J_new = unique_output.mu_star_1_J_new;
         phi_star_1_J_new = unique_output.phi_star_1_J_new;
         tilde_s_unique_new = unique_output.tilde_s_mu_phi_new;
@@ -477,8 +608,8 @@ NormHDPResult normHDP_mcmc(
             }
         }
     }
-    
+
     std::cout << "MCMC completed!\n";
-    
+
     return result;
 }

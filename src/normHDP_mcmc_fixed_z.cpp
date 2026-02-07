@@ -9,6 +9,9 @@
 #include "includes/unique_parameters.h"
 #include "includes/capture_efficiencies.h"
 #include "includes/mean_dispersion.h"
+#include "includes/mean_dispersion_horseshoe.h"
+#include "includes/mean_dispersion_regularized_horseshoe.h"
+#include "includes/mean_dispersion_spike_slab.h"
 #include "includes/utils.h"
 
 #include <iostream>
@@ -33,7 +36,11 @@ Rcpp::List normHDP_mcmc_fixed_z(
     int num_cores = 1,
     SEXP baynorm_mu_estimate = R_NilValue,
     SEXP baynorm_phi_estimate = R_NilValue,
-    SEXP baynorm_beta = R_NilValue
+    SEXP baynorm_beta = R_NilValue,
+	bool use_horseshoe = false,
+    bool use_reg_horseshoe = false,
+	bool use_spike_slab = false,
+    double horseshoe_p0 = 50.0
 ) {
 
     // ============ Input Validation ============
@@ -45,6 +52,10 @@ Rcpp::List normHDP_mcmc_fixed_z(
     }
     if (Y.size() != cluster_estimates.size()) {
         Rcpp::stop("Y and cluster_estimates must have same length (number of datasets)");
+    }
+	int num_priors = (int)use_horseshoe + (int)use_reg_horseshoe + (int)use_spike_slab;
+    if (num_priors > 1) {
+        Rcpp::stop("Can only use one prior: choose horseshoe, regularized horseshoe, OR spike-and-slab");
     }
 
     // ============ Dimensions ============
@@ -106,6 +117,16 @@ Rcpp::List normHDP_mcmc_fixed_z(
     Rcpp::Rcout << "Z is FIXED (not updated during MCMC)" << std::endl;
     Rcpp::Rcout << std::string(60, '=') << std::endl << std::endl;
 
+    if (use_reg_horseshoe) {
+        Rcpp::Rcout << "Prior: Regularized Horseshoe (p_0 = " << horseshoe_p0 << ")" << std::endl;
+    } else if (use_horseshoe) {
+        Rcpp::Rcout << "Prior: Horseshoe" << std::endl;
+    } else if (use_spike_slab) {
+        Rcpp::Rcout << "Prior: Spike-and-Slab (p_0 = " << horseshoe_p0 << ")" << std::endl;
+	} else {
+        Rcpp::Rcout << "Prior: Normal" << std::endl;
+    }
+
     // ============ BayNorm Estimates - Convert from SEXP ============
     Rcpp::NumericVector baynorm_mu_vec(baynorm_mu_estimate);
     Rcpp::NumericVector baynorm_phi_vec(baynorm_phi_estimate);
@@ -156,6 +177,28 @@ Rcpp::List normHDP_mcmc_fixed_z(
     }
 
     Rcpp::Rcout << "BayNorm estimates validated and cleaned" << std::endl;
+	// ============ Initialize Horseshoe Parameters============
+    HorseshoeParams horseshoe_params;
+    RegularizedHorseshoeParams rhs_params;
+    SpikeSlabParams spike_slab_params;
+
+    if (use_horseshoe) {
+        horseshoe_params = initialize_horseshoe_params(J, G);
+        Rcpp::Rcout << "Horseshoe parameters initialized" << std::endl;
+    }
+
+    if (use_reg_horseshoe) {
+        rhs_params = initialize_regularized_horseshoe_params(J, G, horseshoe_p0);
+        Rcpp::Rcout << "Regularized Horseshoe parameters initialized (p_0 = "
+                    << horseshoe_p0 << ")" << std::endl;
+    }
+	if (use_spike_slab) {
+        spike_slab_params = initialize_spike_slab_params(J, G);
+        // Optionally set pi based on horseshoe_p0
+        spike_slab_params.pi = horseshoe_p0 / G;
+        Rcpp::Rcout << "Spike-and-Slab parameters initialized (expected differential genes = "
+                    << horseshoe_p0 << ", pi = " << spike_slab_params.pi << ")" << std::endl;
+    }
 
     // ============ Hyper-parameters ============
 
@@ -321,6 +364,47 @@ Rcpp::List normHDP_mcmc_fixed_z(
     phi_star_1_J_output.reserve(num_saved);
     Beta_output.reserve(num_saved);
 
+	// Horseshoe-specific storage
+    std::vector<std::vector<double>> tau_output;
+    std::vector<Eigen::MatrixXd> lambda_output;
+    std::vector<double> sigma_mu_output;
+
+    // Regularized horseshoe-specific storage
+    std::vector<std::vector<double>> rhs_tau_output;
+    std::vector<double> rhs_tau_0_output;
+    std::vector<Eigen::MatrixXd> rhs_lambda_output;
+    std::vector<double> rhs_sigma_mu_output;
+    std::vector<double> rhs_c_squared_output;
+    std::vector<double> rhs_p_0_output;
+
+	// Spike-and-slab storage
+    std::vector<Eigen::MatrixXd> ss_gamma_output;
+    std::vector<double> ss_pi_output;
+    std::vector<double> ss_sigma_slab_output;
+    std::vector<double> ss_sigma_spike_output;
+
+	if (use_horseshoe || use_reg_horseshoe|| use_spike_slab) {
+        if (use_horseshoe) {
+            tau_output.reserve(num_saved);
+            lambda_output.reserve(num_saved);
+            sigma_mu_output.reserve(num_saved);
+        }
+        if (use_reg_horseshoe) {
+            rhs_tau_output.reserve(num_saved);
+            rhs_tau_0_output.reserve(num_saved);
+            rhs_lambda_output.reserve(num_saved);
+            rhs_sigma_mu_output.reserve(num_saved);
+            rhs_c_squared_output.reserve(num_saved);
+            rhs_p_0_output.reserve(num_saved);
+        }
+		if (use_spike_slab) {
+            ss_gamma_output.reserve(num_saved);
+            ss_pi_output.reserve(num_saved);
+            ss_sigma_slab_output.reserve(num_saved);
+            ss_sigma_spike_output.reserve(num_saved);
+        }
+    }
+
     // Acceptance tracking
     std::vector<double> P_accept_vec(number_iter - 1);
     std::vector<double> alpha_accept_vec(number_iter - 1);
@@ -406,24 +490,59 @@ Rcpp::List normHDP_mcmc_fixed_z(
         }
 
         try {
-            // 1) Regression parameters
-            auto mean_disp_output = mean_dispersion_mcmc(mu_star_1_J_new, phi_star_1_J_new,
-                                                         v_1, v_2, m_b, quadratic);
-            alpha_phi_2_new = mean_disp_output.alpha_phi_2;
-            b_new = mean_disp_output.b;
+            //Mean-Dispersion Regression with appropriate prior
+            if (use_reg_horseshoe) {
+                // Regularized Horseshoe
+                auto rhs_output = mean_dispersion_regularized_horseshoe_mcmc(
+                    mu_star_1_J_new, phi_star_1_J_new, mu_estimate,
+                    rhs_params, v_1, v_2, m_b, quadratic
+                );
+                alpha_phi_2_new = rhs_output.alpha_phi_2;
+                b_new = rhs_output.b;
+                rhs_params = rhs_output.rhs_params;
+
+            } else if (use_horseshoe) {
+                // Standard Horseshoe
+                auto hs_output = mean_dispersion_horseshoe_mcmc(
+                    mu_star_1_J_new, phi_star_1_J_new, mu_estimate,
+                    horseshoe_params, v_1, v_2, m_b, quadratic
+                );
+                alpha_phi_2_new = hs_output.alpha_phi_2;
+                b_new = hs_output.b;
+                horseshoe_params = hs_output.horseshoe_params;
+
+            }  else if (use_spike_slab) {
+                // Spike-and-Slab
+                auto ss_output = mean_dispersion_spike_slab_mcmc(
+                    mu_star_1_J_new, phi_star_1_J_new, mu_estimate,
+                    spike_slab_params, v_1, v_2, m_b, quadratic
+                );
+                alpha_phi_2_new = ss_output.alpha_phi_2;
+                b_new = ss_output.b;
+                spike_slab_params = ss_output.spike_slab_params;
+
+            }else {
+                // Normal prior
+                auto mean_disp_output = mean_dispersion_mcmc(
+                    mu_star_1_J_new, phi_star_1_J_new,
+                    v_1, v_2, m_b, quadratic
+                );
+                alpha_phi_2_new = mean_disp_output.alpha_phi_2;
+                b_new = mean_disp_output.b;
+            }
         } catch (std::exception& e) {
             Rcpp::stop("Error in mean_dispersion_mcmc at iteration %d: %s", iter, e.what());
         }
 
         try {
-            // 2) Dataset-specific probabilities (Z is fixed)
+            // Dataset-specific probabilities (Z is fixed)
             P_J_D_new = dataset_specific_mcmc(Z, P_new, alpha_new);
         } catch (std::exception& e) {
             Rcpp::stop("Error in dataset_specific_mcmc at iteration %d: %s", iter, e.what());
         }
 
         try {
-            // 3) Component probabilities
+            // Component probabilities
             auto comp_output = component_probabilities_mcmc(P_new, P_J_D_new, alpha_zero_new,
                                                            alpha_new, covariance_component_new,
                                                            mean_X_component_new, tilde_s_component_new,
@@ -439,7 +558,7 @@ Rcpp::List normHDP_mcmc_fixed_z(
         }
 
         try {
-            // 4) Alpha
+            // Alpha
             auto alpha_output = alpha_mcmc(P_J_D_new, P_new, alpha_new, mean_X_alpha_new,
                                           M_2_alpha_new, variance_alpha_new, iter, adaptive_prop);
             alpha_new = alpha_output.alpha_new;
@@ -453,7 +572,7 @@ Rcpp::List normHDP_mcmc_fixed_z(
         }
 
         try {
-            // 5) Alpha zero
+            // Alpha zero
             auto alpha_zero_output = alpha_zero_mcmc(P_new, alpha_zero_new, mean_X_alpha_zero_new,
                                                     M_2_alpha_zero_new, variance_alpha_zero_new,
                                                     iter, adaptive_prop);
@@ -468,25 +587,53 @@ Rcpp::List normHDP_mcmc_fixed_z(
         }
 
         try {
-            // 6) Unique parameters
-            auto unique_output = unique_parameters_mcmc(mu_star_1_J_new, phi_star_1_J_new,
-                                                       mean_X_unique_new, tilde_s_unique_new,
-                                                       Z, b_new, alpha_phi_2_new, Beta_new,
-                                                       alpha_mu_2, covariance_unique_new, iter,
-                                                       quadratic, Y, adaptive_prop, num_cores);
-            mu_star_1_J_new = unique_output.mu_star_1_J_new;
-            phi_star_1_J_new = unique_output.phi_star_1_J_new;
-            tilde_s_unique_new = unique_output.tilde_s_mu_phi_new;
-            mean_X_unique_new = unique_output.mean_X_mu_phi_new;
-            covariance_unique_new = unique_output.covariance_new;
-            unique_count += unique_output.accept_count;
-            unique_accept_vec[iter - 2] = (double)unique_count / ((iter - 1) * J * G);
-        } catch (std::exception& e) {
-            Rcpp::stop("Error in unique_parameters_mcmc at iteration %d: %s", iter, e.what());
-        }
+    // Unique parameters - CORRECTED
+    MuPriorType prior_type = MuPriorType::LOGNORMAL;
+    const HorseshoeParams* hs_ptr = nullptr;
+    const RegularizedHorseshoeParams* rhs_ptr = nullptr;
+	const SpikeSlabParams* ss_ptr = nullptr;
+    const Eigen::VectorXd* baseline_ptr = nullptr;
+
+    if (use_reg_horseshoe) {
+        prior_type = MuPriorType::REGULARIZED_HORSESHOE;
+        rhs_ptr = &rhs_params;
+        baseline_ptr = &mu_estimate;
+    } else if (use_horseshoe) {
+        prior_type = MuPriorType::HORSESHOE;
+        hs_ptr = &horseshoe_params;
+        baseline_ptr = &mu_estimate;
+    } else if (use_spike_slab) {
+                prior_type = MuPriorType::SPIKE_SLAB;
+                ss_ptr = &spike_slab_params;
+                baseline_ptr = &mu_estimate;
+    }
+
+    auto unique_output = unique_parameters_mcmc(
+        mu_star_1_J_new, phi_star_1_J_new,
+        mean_X_unique_new, tilde_s_unique_new,
+        Z, b_new, alpha_phi_2_new, Beta_new,
+        alpha_mu_2, covariance_unique_new, iter,
+        quadratic, Y, adaptive_prop, num_cores,
+        prior_type,
+        hs_ptr,
+        rhs_ptr,
+		ss_ptr,
+        baseline_ptr
+    );
+
+    mu_star_1_J_new = unique_output.mu_star_1_J_new;
+    phi_star_1_J_new = unique_output.phi_star_1_J_new;
+    tilde_s_unique_new = unique_output.tilde_s_mu_phi_new;
+    mean_X_unique_new = unique_output.mean_X_mu_phi_new;
+    covariance_unique_new = unique_output.covariance_new;
+    unique_count += unique_output.accept_count;
+    unique_accept_vec[iter - 2] = (double)unique_count / ((iter - 1) * J * G);
+} catch (std::exception& e) {
+    Rcpp::stop("Error in unique_parameters_mcmc at iteration %d: %s", iter, e.what());
+}
 
         try {
-            // 7) Capture efficiencies
+            // Capture efficiencies
             auto capture_output = capture_efficiencies_mcmc(Beta_new, Y, Z, mu_star_1_J_new,
                                                            phi_star_1_J_new, a_d_beta, b_d_beta,
                                                            iter, M_2_capture_new, mean_X_capture_new,
@@ -502,7 +649,7 @@ Rcpp::List normHDP_mcmc_fixed_z(
             Rcpp::stop("Error in capture_efficiencies_mcmc at iteration %d: %s", iter, e.what());
         }
 
-        // 8) Save outputs
+        // Save outputs
         if (iter >= burn_in && (iter - burn_in) % thinning == 0) {
             try {
                 b_output.push_back(b_new);
@@ -514,6 +661,47 @@ Rcpp::List normHDP_mcmc_fixed_z(
                 mu_star_1_J_output.push_back(mu_star_1_J_new);
                 phi_star_1_J_output.push_back(phi_star_1_J_new);
                 Beta_output.push_back(Beta_new);
+
+				// horseshoe parameters
+                if (use_horseshoe) {
+                    tau_output.push_back(horseshoe_params.tau);
+
+                    Eigen::MatrixXd lambda_mat(J, G);
+                    for (int j = 0; j < J; ++j) {
+                        lambda_mat.row(j) = horseshoe_params.lambda[j];
+                    }
+                    lambda_output.push_back(lambda_mat);
+                    sigma_mu_output.push_back(horseshoe_params.sigma_mu);
+                }
+
+                // Save regularized horseshoe parameters
+                if (use_reg_horseshoe) {
+                    rhs_tau_output.push_back(rhs_params.tau);
+                    rhs_tau_0_output.push_back(rhs_params.tau_0);
+
+                    Eigen::MatrixXd lambda_mat(J, G);
+                    for (int j = 0; j < J; ++j) {
+                        lambda_mat.row(j) = rhs_params.lambda[j];
+                    }
+                    rhs_lambda_output.push_back(lambda_mat);
+                    rhs_sigma_mu_output.push_back(rhs_params.sigma_mu);
+                    rhs_c_squared_output.push_back(rhs_params.c_squared);
+                    rhs_p_0_output.push_back(rhs_params.p_0);
+                }
+
+				// Save spike-and-slab parameters  ← ADD THIS BLOCK
+                if (use_spike_slab) {
+                    // Save gamma (selection indicators) as J×G matrix
+                    Eigen::MatrixXd gamma_mat(J, G);
+                    for (int j = 0; j < J; ++j) {
+                        gamma_mat.row(j) = spike_slab_params.gamma[j].col(0).transpose();
+                    }
+                    ss_gamma_output.push_back(gamma_mat);
+                    ss_pi_output.push_back(spike_slab_params.pi);
+                    ss_sigma_slab_output.push_back(spike_slab_params.sigma_slab);
+                    ss_sigma_spike_output.push_back(spike_slab_params.sigma_spike);
+                }
+
             } catch (std::exception& e) {
                 Rcpp::stop("Error saving output at iteration %d: %s", iter, e.what());
             }
@@ -532,7 +720,7 @@ Rcpp::List normHDP_mcmc_fixed_z(
     );
 
     // ============ Return as Rcpp::List ============
-    return Rcpp::List::create(
+    Rcpp::List result = Rcpp::List::create(
         Rcpp::Named("b_output") = b_output,
         Rcpp::Named("alpha_phi2_output") = alpha_phi2_output,
         Rcpp::Named("P_J_D_output") = P_J_D_output,
@@ -547,6 +735,33 @@ Rcpp::List normHDP_mcmc_fixed_z(
         Rcpp::Named("D") = D,
         Rcpp::Named("C") = C,
         Rcpp::Named("G") = G,
-        Rcpp::Named("Z") = cluster_estimates  // Return original cluster labels
+        Rcpp::Named("Z") = cluster_estimates,
+        Rcpp::Named("use_horseshoe") = use_horseshoe,
+        Rcpp::Named("use_reg_horseshoe") = use_reg_horseshoe,
+		Rcpp::Named("use_spike_slab") = use_spike_slab
     );
+
+
+	if (use_horseshoe) {
+        result["tau_output"] = tau_output;
+        result["lambda_output"] = lambda_output;
+        result["sigma_mu_output"] = sigma_mu_output;
+    }
+
+    if (use_reg_horseshoe) {
+        result["rhs_tau_output"] = rhs_tau_output;
+        result["rhs_tau_0_output"] = rhs_tau_0_output;
+        result["rhs_lambda_output"] = rhs_lambda_output;
+        result["rhs_sigma_mu_output"] = rhs_sigma_mu_output;
+        result["rhs_c_squared_output"] = rhs_c_squared_output;
+        result["rhs_p_0_output"] = rhs_p_0_output;
+    }
+	if (use_spike_slab) {
+        result["ss_gamma_output"] = ss_gamma_output;
+        result["ss_pi_output"] = ss_pi_output;
+        result["ss_sigma_slab_output"] = ss_sigma_slab_output;
+        result["ss_sigma_spike_output"] = ss_sigma_spike_output;
+    }
+
+    return result;
 }

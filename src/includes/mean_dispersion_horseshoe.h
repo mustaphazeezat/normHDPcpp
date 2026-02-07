@@ -43,4 +43,11 @@ MeanDispersionHorseshoeResult mean_dispersion_horseshoe_mcmc(
 // Initialize horseshoe parameters
 HorseshoeParams initialize_horseshoe_params(int J, int G);
 
+HorseshoeParams initialize_horseshoe_params_empirical(
+    int J,
+    int G,
+    const Eigen::VectorXd& mu_baseline,
+    const Eigen::MatrixXd& mu_initial
+);;
+
 #endif // MEAN_DISPERSION_HORSESHOE_H
